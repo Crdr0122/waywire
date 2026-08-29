@@ -1,0 +1,4 @@
+<protocol name="wayland">
+  <interface name="wl_display" version="1"/>
+  <interface name="wl_registry" version="1"/>
+</protocol>

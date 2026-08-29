@@ -1,0 +1,108 @@
+module Wayland.Protocol where
+
+import Data.List (elemIndex)
+import Data.Text (Text)
+
+data Protocol = Protocol
+  { protoName :: Text
+  , protoCopyright :: Maybe Text
+  , protoDescription :: Maybe Description
+  , protoInterfaces :: [Interface]
+  }
+  deriving (Eq, Show)
+
+data Interface = Interface
+  { ifaceName :: Text
+  , ifaceVersion :: Int
+  , ifaceDescription :: Maybe Description
+  , ifaceRequests :: [Request]
+  , ifaceEvents :: [Event]
+  , ifaceEnums :: [Enum']
+  }
+  deriving (Eq, Show)
+
+data Request = Request
+  { reqName :: Text
+  , reqDescription :: Maybe Description
+  , reqSince :: Int
+  , reqDeprecatedSince :: Maybe Int
+  , reqDestructor :: Bool -- Request Type
+  , reqArguments :: [Argument]
+  }
+  deriving (Eq, Show)
+
+data Event = Event
+  { eventName :: Text
+  , eventDescription :: Maybe Description
+  , eventSince :: Int
+  , eventDeprecatedSince :: Maybe Int
+  , eventDestructor :: Bool
+  , eventArguments :: [Argument]
+  }
+  deriving (Eq, Show)
+
+data Argument = Argument
+  { argName :: Text
+  , argDescription :: Maybe Description
+  , argSummary :: Maybe Text
+  , argType :: ArgType
+  , argEnum :: Maybe EnumRef
+  }
+  deriving (Eq, Show)
+
+data ArgType
+  = TypeInt
+  | TypeUInt
+  | TypeFixed
+  | TypeString
+  | TypeArray
+  | TypeFileDescriptor
+  | TypeObject
+      { objectInterface :: Maybe Text
+      , objectNullable :: Bool
+      }
+  | TypeNewId
+      { newIdInterface :: Maybe Text
+      , newIdNullable :: Bool
+      }
+  deriving (Eq, Show)
+
+data Enum' = Enum'
+  { enumName :: Text
+  , enumDescription :: Maybe Description
+  , enumSince :: Int
+  , enumBitfield :: Bool
+  , enumEntries :: [EnumEntry]
+  }
+  deriving (Eq, Show)
+
+data EnumEntry = EnumEntry
+  { enumEntryName :: Text
+  , enumEntryValue :: Int
+  , enumEntryDescription :: Maybe Description
+  , enumEntrySummary :: Maybe Text
+  , enumEntrySince :: Int
+  , enumEntryDeprecatedSince :: Maybe Int
+  }
+  deriving (Eq, Show)
+
+data Description = Description
+  { descSummary :: Maybe Text
+  , descText :: Text
+  }
+  deriving (Eq, Show)
+
+data EnumRef
+  = LocalEnum Text
+  | ExternalEnum Text Text
+  deriving (Eq, Show)
+
+requestOpCode :: Interface -> Request -> Int
+requestOpCode iface req = case elemIndex req (ifaceRequests iface) of
+  Just n -> n
+  Nothing -> error "request does not belong to interface"
+
+eventOpCode :: Interface -> Event -> Int
+eventOpCode iface event = case elemIndex event (ifaceEvents iface) of
+  Just n -> n
+  Nothing -> error "request does not belong to interface"
