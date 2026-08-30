@@ -1,6 +1,9 @@
 {-# LANGUAGE OverloadedStrings #-}
 
-module Wayland.Protocol.Parser where
+module Wayland.Protocol.Parser (
+  parseProtocol,
+  parseInterface,
+) where
 
 import Data.Text as T
 import Text.Read (readEither)
@@ -104,11 +107,11 @@ parseArgType _ _ (Left e) = Left e
 parseArgType "int" _ _ = Right TypeInt
 parseArgType "uint" _ _ = Right TypeUInt
 parseArgType "fixed" _ _ = Right TypeFixed
-parseArgType "string" _ _ = Right TypeString
+parseArgType "string" _ (Right null') = Right $ TypeString null'
 parseArgType "array" _ _ = Right TypeArray
 parseArgType "fd" _ _ = Right TypeFileDescriptor
 parseArgType "object" iface (Right null') = Right $ TypeObject iface null'
-parseArgType "new_id" iface (Right null') = Right $ TypeNewId iface null'
+parseArgType "new_id" iface _ = Right $ TypeNewId iface
 parseArgType unknown _ _ = Left $ UnknownArgumentType unknown
 
 parseEnumRef :: Text -> EnumRef

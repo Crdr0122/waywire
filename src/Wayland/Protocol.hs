@@ -2,6 +2,7 @@ module Wayland.Protocol where
 
 import Data.List (elemIndex)
 import Data.Text (Text)
+import Data.Int (Int32)
 
 data Protocol = Protocol
   { protoName :: Text
@@ -36,7 +37,7 @@ data Event = Event
   , eventDescription :: Maybe Description
   , eventSince :: Int
   , eventDeprecatedSince :: Maybe Int
-  , eventDestructor :: Bool
+  , eventDestructor :: Bool -- Event Type
   , eventArguments :: [Argument]
   }
   deriving (Eq, Show)
@@ -54,17 +55,14 @@ data ArgType
   = TypeInt
   | TypeUInt
   | TypeFixed
-  | TypeString
+  | TypeString {stringNullable :: Bool}
   | TypeArray
   | TypeFileDescriptor
   | TypeObject
       { objectInterface :: Maybe Text
       , objectNullable :: Bool
       }
-  | TypeNewId
-      { newIdInterface :: Maybe Text
-      , newIdNullable :: Bool
-      }
+  | TypeNewId {newIdInterface :: Maybe Text}
   deriving (Eq, Show)
 
 data Enum' = Enum'
@@ -97,6 +95,11 @@ data EnumRef
   | ExternalEnum Text Text
   deriving (Eq, Show)
 
+type Fixed = Int32
+
+data NewObject --TODO Placeholder for new_id
+data ObjectRef
+
 requestOpCode :: Interface -> Request -> Int
 requestOpCode iface req = case elemIndex req (ifaceRequests iface) of
   Just n -> n
@@ -105,4 +108,4 @@ requestOpCode iface req = case elemIndex req (ifaceRequests iface) of
 eventOpCode :: Interface -> Event -> Int
 eventOpCode iface event = case elemIndex event (ifaceEvents iface) of
   Just n -> n
-  Nothing -> error "request does not belong to interface"
+  Nothing -> error "event does not belong to interface"
