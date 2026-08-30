@@ -1,8 +1,9 @@
 module Wayland.Protocol where
 
+import Data.Int (Int32)
 import Data.List (elemIndex)
 import Data.Text (Text)
-import Data.Int (Int32)
+import Data.Word (Word32)
 
 data Protocol = Protocol
   { protoName :: Text
@@ -97,8 +98,18 @@ data EnumRef
 
 type Fixed = Int32
 
-data NewObject --TODO Placeholder for new_id
+data NewObject -- TODO Placeholder for new_id
 data ObjectRef
+
+data ObjectId = ObjectId Word32
+
+data Object a = Object
+  { objectId :: ObjectId
+  }
+
+isNewID :: Argument -> Bool
+isNewID Argument{argType = TypeNewId _} = True
+isNewID _ = False
 
 requestOpCode :: Interface -> Request -> Int
 requestOpCode iface req = case elemIndex req (ifaceRequests iface) of

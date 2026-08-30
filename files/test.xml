@@ -1,4 +1,23 @@
-<protocol name="wayland">
-  <interface name="wl_display" version="1"/>
-  <interface name="wl_registry" version="1"/>
+<?xml version="1.0"?>
+<protocol name="test">
+  <interface name="wl_callback" version="1">
+    <request name="start">
+    </request>
+  </interface>
+  <interface name="wl_display" version="1">
+    <request name="sync">
+      <arg name="callback" type="new_id" interface="wl_callback"/>
+      <arg name="test_int" type="int"/>
+    </request>
+    <event name="appeared">
+      <arg name="appear_timing" type="uint"/>
+    </event>
+    <request name="get_registry">
+      <!-- <arg name="registry" type="new_id" interface="wl_registry"/> -->
+    </request>
+    <event name="error">
+      <arg name="code" type="uint"/>
+      <arg name="message" type="string"/>
+    </event>
+  </interface>
 </protocol>
