@@ -1,5 +1,8 @@
 module Wayland.Object where
 
+import Data.Binary
+import Data.Binary.Get
+import Data.Bits (shiftR, (.&.))
 import Data.ByteString as BS
 import Data.ByteString.Builder qualified as B
 import Data.ByteString.Lazy qualified as BL
@@ -42,9 +45,27 @@ data Message = Message
 
 data DecodeError
   = NotEnoughBytes
-  | InvalidMessageSize Word32
+  | InvalidMessageSize Word16
   | MessageTruncated
   deriving (Eq, Show)
+
+-- testEncode v = BS.length (BL.toStrict (B.toLazyByteString (encodeValue v))) == valueSize v
+
+decodeMessageHeader :: ByteString -> Either DecodeError (ObjectId, Opcode, ByteString)
+decodeMessageHeader bs
+  | BS.length bs < 8 = Left NotEnoughBytes
+  | otherwise = case runGetOrFail getHeader (BS.fromStrict bs) of
+      Left _ -> Left NotEnoughBytes
+      Right (remains, _, (obId, header)) ->
+        let size :: Word16 = fromIntegral $ header `shiftR` 16
+            code = Opcode $ fromIntegral $ header .&. 0xFFFF
+         in Right (obId, code, BL.toStrict remains)
+
+getHeader :: Get (ObjectId, Word32)
+getHeader = do
+  objectId <- ObjectId <$> getWord32le
+  header <- getWord32le
+  pure (objectId, header)
 
 encodeMessage :: Message -> ByteString
 encodeMessage (Message (ObjectId objId) (Opcode op) payload) =
@@ -55,11 +76,11 @@ encodeMessage (Message (ObjectId objId) (Opcode op) payload) =
   totalMsgSize = 8 + totalPayloadSize
 
   -- 2. Build 8-byte Header:
-  --    [4 bytes: Object ID] [2 bytes: Opcode] [2 bytes: Total Size]
+  --    [4 bytes: Object ID] [2 bytes: Opcode] [2 bytes: Total Size] -- Order is due to little endian
   headerBuilder =
     B.word32LE objId
-      <> B.word16LE (fromIntegral totalMsgSize)
       <> B.word16LE op
+      <> B.word16LE (fromIntegral totalMsgSize)
 
   -- 3. Build Payload
   payloadBuilder = foldMap encodeValue payload

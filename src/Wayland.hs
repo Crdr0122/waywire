@@ -18,5 +18,4 @@ main = do
   putStrLn ""
   print $ objectId display
 
-display :: Object WlDisplay
-display = Object (ObjectId 1)
+display = Object (ObjectId 1) Connection
