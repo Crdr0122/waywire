@@ -92,19 +92,16 @@ generateReq uName lName Request{reqName = n, reqArguments = args} = do
 generateIfaceEvents :: Interface -> Q [Dec]
 generateIfaceEvents Interface{ifaceName = n, ifaceEvents = events} = do
   let uName = unpack . toCamelU $ n
-      lName = transformFstStr C.toLower uName
-  flattenQ $ generateEvent uName lName <$> events
+      conList = generateEvent uName <$> events
+  dec <- dataD (cxt []) (mkName (uName ++ "Event")) [] Nothing conList []
+  pure [dec]
 
-generateEvent :: String -> String -> Event -> Q [Dec]
-generateEvent uName lName Event{eventName = n, eventArguments = args} = do
-  let rName = mkName . (lName ++) . unpack . toCamelU $ n
-      uType = conT (mkName uName)
-      argTypes = uType : (generateArgType <$> args)
-      resultType = [t|IO ()|]
-      argWithTypes = foldr (\arg res -> [t|$arg -> $res|]) resultType argTypes
-  sig <- sigD rName argWithTypes
-  fun <- funD rName [clause [] (normalB notWrittenYetExp) []]
-  pure [sig, fun]
+generateEvent :: String -> Event -> Q Con
+generateEvent uName Event{eventName = n, eventArguments = args} = do
+  let eName = mkName . (uName ++) . unpack . toCamelU $ n
+      argTypes = generateArgType <$> args
+      argBangTypes = bangType (bang noSourceUnpackedness noSourceStrictness) <$> argTypes
+  normalC eName argBangTypes
 
 generateArgType :: Argument -> Q Type
 generateArgType Argument{argType = t} = case t of
