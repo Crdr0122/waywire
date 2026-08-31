@@ -103,6 +103,18 @@ generateEvent uName Event{eventName = n, eventArguments = args} = do
       argBangTypes = bangType (bang noSourceUnpackedness noSourceStrictness) <$> argTypes
   normalC eName argBangTypes
 
+generateIfaceEnums :: Interface -> Q [Dec]
+generateIfaceEnums Interface{ifaceName = n, ifaceEnums = enums} = do
+  let uName = unpack . toCamelU $ n
+  flattenQ $ generateEnum uName <$> enums
+
+generateEnum :: String -> Enum' -> Q [Dec]
+generateEnum uName Enum'{enumName = n, enumEntries = entries} = do
+  let eName = (uName ++) . unpack . toCamelU $ n
+      entryNames = ((\e -> normalC e []) . mkName . (eName ++) . unpack . toCamelU . enumEntryName) <$> entries
+  dec <- dataD (cxt []) (mkName eName) [] Nothing entryNames []
+  pure [dec]
+
 generateArgType :: Argument -> Q Type
 generateArgType Argument{argType = t} = case t of
   TypeInt -> [t|Int32|]
