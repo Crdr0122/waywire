@@ -81,7 +81,7 @@ generateReq uName lName Request{reqName = n, reqArguments = args} = do
       uType = conT (mkName uName)
       (newID, rest) = L.partition isNewID args
       argTypes = uType : (generateArgType <$> rest)
-      resultType = case newID of
+      resultType = case newID of -- TODO Additional internal function that remembers where newID is
         [] -> [t|IO ()|]
         x : _ -> [t|IO ($(generateArgType x))|]
       argWithTypes = foldr (\arg res -> [t|$arg -> $res|]) resultType argTypes
@@ -116,7 +116,7 @@ generateArgType Argument{argType = t} = case t of
   TypeObject Nothing True -> [t|Maybe Object|]
   TypeObject (Just iface) False -> [t|$(uName iface)|]
   TypeObject (Just iface) True -> [t|Maybe $(uName iface)|]
-  TypeNewId Nothing -> [t|NewObject|] -- TODO How to represent this
+  TypeNewId Nothing -> [t|NewObject|]
   TypeNewId (Just iface) -> [t|$(uName iface)|]
  where
   uName = conT . mkName . unpack . toCamelU

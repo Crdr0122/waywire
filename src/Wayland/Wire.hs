@@ -1,0 +1,1 @@
+module Wayland.Wire where

@@ -47,6 +47,7 @@ library
     Wayland
     Wayland.Protocol
     Wayland.Protocol.Parser
+    Wayland.Wire
 
   other-modules:
     Wayland.TH
@@ -60,10 +61,9 @@ library
     free,
     network,
     template-haskell,
-    transformers,
-    network,
-    unix,
     text,
+    transformers,
+    unix,
     xml-conduit,
 
   hs-source-dirs: src
