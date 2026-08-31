@@ -17,6 +17,7 @@ data ParseError
   = MissingAttribute Text
   | InvalidAttribute Text Text
   | UnknownArgumentType Text
+  | ObjectMissingInterface
   deriving (Eq, Show)
 
 readInt :: Text -> Text -> Either ParseError Int
@@ -110,7 +111,8 @@ parseArgType "fixed" _ _ = Right TypeFixed
 parseArgType "string" _ (Right null') = Right $ TypeString null'
 parseArgType "array" _ _ = Right TypeArray
 parseArgType "fd" _ _ = Right TypeFileDescriptor
-parseArgType "object" iface (Right null') = Right $ TypeObject iface null'
+parseArgType "object" (Just iface) (Right null') = Right $ TypeObject iface null'
+parseArgType "object" Nothing _ = Left $ ObjectMissingInterface
 parseArgType "new_id" iface _ = Right $ TypeNewId iface
 parseArgType unknown _ _ = Left $ UnknownArgumentType unknown
 

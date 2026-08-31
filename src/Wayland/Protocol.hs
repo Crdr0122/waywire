@@ -60,7 +60,7 @@ data ArgType
   | TypeArray
   | TypeFileDescriptor
   | TypeObject
-      { objectInterface :: Maybe Text
+      { objectInterface :: Text
       , objectNullable :: Bool
       }
   | TypeNewId {newIdInterface :: Maybe Text}
@@ -97,15 +97,6 @@ data EnumRef
   deriving (Eq, Show)
 
 type Fixed = Int32
-
-data NewObject -- TODO Placeholder for new_id
-data ObjectRef
-
-data ObjectId = ObjectId Word32
-
-data Object a = Object
-  { objectId :: ObjectId
-  }
 
 isNewID :: Argument -> Bool
 isNewID Argument{argType = TypeNewId _} = True

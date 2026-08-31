@@ -15,6 +15,7 @@ import Language.Haskell.TH.Syntax (addDependentFile, lift)
 import System.Posix.Types (Fd)
 import Text.XML
 import Text.XML.Cursor
+import Wayland.Object
 import Wayland.Protocol
 import Wayland.Protocol.Parser
 
@@ -124,12 +125,10 @@ generateArgType Argument{argType = t} = case t of
   TypeString True -> [t|Maybe Text|]
   TypeFileDescriptor -> [t|Fd|]
   TypeArray -> [t|ByteString|]
-  TypeObject Nothing False -> [t|Object|] -- Object interface should be specified
-  TypeObject Nothing True -> [t|Maybe Object|]
-  TypeObject (Just iface) False -> [t|$(uName iface)|]
-  TypeObject (Just iface) True -> [t|Maybe $(uName iface)|]
+  TypeObject iface False -> [t|Object $(uName iface)|]
+  TypeObject iface True -> [t|Maybe (Object $(uName iface))|]
   TypeNewId Nothing -> [t|NewObject|]
-  TypeNewId (Just iface) -> [t|$(uName iface)|]
+  TypeNewId (Just iface) -> [t|Object $(uName iface)|]
  where
   uName = conT . mkName . unpack . toCamelU
 
