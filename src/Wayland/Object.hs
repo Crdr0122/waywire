@@ -9,24 +9,13 @@ import Data.ByteString as BS
 import Data.ByteString.Builder qualified as B
 import Data.ByteString.Lazy qualified as BL
 import Data.Int
+import Data.List qualified as L
 import Data.Text as T
 import Data.Text.Encoding as TE
 import Data.Word
 import System.Posix.Types
 import Wayland.Protocol
-
-data NewObject -- TODO Placeholder for new_id
-
-data ObjectId = ObjectId Word32 deriving (Eq, Ord, Show)
-data Opcode = Opcode Word16 deriving (Eq, Ord, Show)
-
-data Object a = Object
-  { objectId :: ObjectId
-  , objectConnection :: Connection
-  }
-  deriving (Eq, Show)
-
-data Connection = Connection deriving (Eq, Show)
+import Wayland.Types
 
 data Value
   = ValueInt Int32
@@ -64,10 +53,33 @@ data DecodeError
   | DecodeHeaderFailed String
   | DecodeArgFailed String
   | InvalidString
+  | UnknownEventOpcode Word16
   | ExtraBytes
   deriving (Eq, Show)
 
--- testEncode v = BS.length (BL.toStrict (B.toLazyByteString (encodeValue v))) == valueSize v
+data DecodedEvent = DecodedEvent
+  { decodedEvent :: Event
+  , decodedValues :: [Value]
+  }
+
+decodeInterfaceEvent :: Interface -> Opcode -> BL.ByteString -> Either DecodeError DecodedEvent
+decodeInterfaceEvent iface opcode@(Opcode o) payload = do
+  event <- maybe (Left $ UnknownEventOpcode o) Right $ eventAtOpcode iface opcode
+  decodeEvent event payload
+
+decodeEvent :: Event -> BL.ByteString -> Either DecodeError DecodedEvent
+decodeEvent e@Event{eventArguments = args} bs = do
+  values <- decodeValues types bs
+  pure $ DecodedEvent e values
+ where
+  types = argTypeToValueType . argType <$> args
+
+eventAtOpcode :: Interface -> Opcode -> Maybe Event
+eventAtOpcode Interface{ifaceEvents = e} (Opcode o) = e L.!? (fromIntegral o)
+
+requestAtOpcode :: Interface -> Opcode -> Maybe Request
+requestAtOpcode Interface{ifaceRequests = r} (Opcode o) = r L.!? (fromIntegral o)
+
 testMessage :: Message
 testMessage =
   Message
@@ -79,8 +91,8 @@ testMessage =
     , ValueArray "abc"
     ]
 
-types :: [ValueType]
-types =
+testTypes :: [ValueType]
+testTypes =
   [ ValueTypeUInt
   , ValueTypeString
   , ValueTypeObject
@@ -95,7 +107,7 @@ argTypeToValueType (TypeString _) = ValueTypeString
 argTypeToValueType TypeArray = ValueTypeArray
 argTypeToValueType (TypeObject{}) = ValueTypeObject
 argTypeToValueType (TypeNewId{}) = ValueTypeNewId
-argTypeToValueType (TypeFileDescriptor) = ValueTypeFd
+argTypeToValueType TypeFileDescriptor = ValueTypeFd
 
 decodeMessageHeader :: BL.ByteString -> Either DecodeError (ObjectId, Opcode, BL.ByteString)
 decodeMessageHeader bs
@@ -173,14 +185,11 @@ encodeMessage (Message (ObjectId objId) (Opcode op) payload) =
   totalPayloadSize = sum payloadSizes
   totalMsgSize = 8 + totalPayloadSize
 
-  -- 2. Build 8-byte Header:
-  --    [4 bytes: Object ID] [2 bytes: Opcode] [2 bytes: Total Size] -- Order is due to little endian
   headerBuilder =
     B.word32LE objId
       <> B.word16LE op
       <> B.word16LE (fromIntegral totalMsgSize)
 
-  -- 3. Build Payload
   payloadBuilder = foldMap encodeValue payload
 
 valueSize :: Value -> Int

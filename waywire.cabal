@@ -45,10 +45,11 @@ common warnings
 library
   exposed-modules:
     Wayland
+    Wayland.Object
     Wayland.Protocol
     Wayland.Protocol.Parser
+    Wayland.Types
     Wayland.Wire
-    Wayland.Object
 
   other-modules:
     Wayland.TH
