@@ -37,7 +37,7 @@ data Value
   | ValueArray ByteString
   | ValueObject ObjectId
   | ValueNewId ObjectId
-  | ValueFd Fd
+  | ValueFd
   deriving (Show)
 
 data ValueType
@@ -48,6 +48,7 @@ data ValueType
   | ValueTypeArray
   | ValueTypeObject
   | ValueTypeNewId
+  | ValueTypeFd
 
 data Message = Message
   { messageObject :: ObjectId
@@ -72,9 +73,29 @@ testMessage =
   Message
     (ObjectId 3)
     (Opcode 2)
-    [ ValueInt 3
-    , ValueString "Hello"
+    [ ValueUInt 42
+    , ValueString "hello"
+    , ValueObject (ObjectId 7)
+    , ValueArray "abc"
     ]
+
+types :: [ValueType]
+types =
+  [ ValueTypeUInt
+  , ValueTypeString
+  , ValueTypeObject
+  , ValueTypeArray
+  ]
+
+argTypeToValueType :: ArgType -> ValueType
+argTypeToValueType TypeInt = ValueTypeInt
+argTypeToValueType TypeUInt = ValueTypeUInt
+argTypeToValueType TypeFixed = ValueTypeFixed
+argTypeToValueType (TypeString _) = ValueTypeString
+argTypeToValueType TypeArray = ValueTypeArray
+argTypeToValueType (TypeObject{}) = ValueTypeObject
+argTypeToValueType (TypeNewId{}) = ValueTypeNewId
+argTypeToValueType (TypeFileDescriptor) = ValueTypeFd
 
 decodeMessageHeader :: BL.ByteString -> Either DecodeError (ObjectId, Opcode, BL.ByteString)
 decodeMessageHeader bs
@@ -118,6 +139,7 @@ decodeValue ValueTypeObject bs = do
 decodeValue ValueTypeNewId bs = do
   (i, remains) <- runDecoder getWord32le bs
   pure (ValueNewId (ObjectId i), remains)
+decodeValue ValueTypeFd bs = pure (ValueFd, bs)
 decodeValue ValueTypeArray bs = case runGetOrFail getWord32le bs of
   Left (_, _, str) -> Left $ DecodeArgFailed str
   Right (remainArray, _, i) -> case runGetOrFail (getByteString (pad4 $ fromIntegral i)) remainArray of
@@ -167,7 +189,7 @@ valueSize (ValueUInt _) = 4
 valueSize (ValueFixed _) = 4
 valueSize (ValueObject _) = 4
 valueSize (ValueNewId _) = 4
-valueSize (ValueFd _) = 0
+valueSize ValueFd = 0
 valueSize (ValueString txt) =
   let len = BS.length (TE.encodeUtf8 txt) + 1 -- includes NUL terminator
    in 4 + pad4 len
@@ -182,7 +204,7 @@ encodeValue (ValueUInt u) = B.word32LE u
 encodeValue (ValueFixed f) = B.int32LE f
 encodeValue (ValueObject (ObjectId o)) = B.word32LE o
 encodeValue (ValueNewId (ObjectId n)) = B.word32LE n
-encodeValue (ValueFd _) = mempty
+encodeValue ValueFd = mempty
 encodeValue ValueNullString = B.word32LE 0
 encodeValue (ValueString txt) =
   let bs = TE.encodeUtf8 txt
