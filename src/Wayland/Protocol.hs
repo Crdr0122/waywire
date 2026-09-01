@@ -96,7 +96,6 @@ data EnumRef
   | ExternalEnum Text Text
   deriving (Eq, Show)
 
-type Fixed = Int32
 
 isNewID :: Argument -> Bool
 isNewID Argument{argType = TypeNewId _} = True
@@ -111,3 +110,4 @@ eventOpCode :: Interface -> Event -> Int
 eventOpCode iface event = case elemIndex event (ifaceEvents iface) of
   Just n -> n
   Nothing -> error "event does not belong to interface"
+
