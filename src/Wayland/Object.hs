@@ -1,3 +1,5 @@
+{-# LANGUAGE OverloadedStrings #-}
+
 module Wayland.Object where
 
 import Data.Binary
@@ -36,30 +38,104 @@ data Value
   | ValueObject ObjectId
   | ValueNewId ObjectId
   | ValueFd Fd
+  deriving (Show)
+
+data ValueType
+  = ValueTypeInt
+  | ValueTypeUInt
+  | ValueTypeFixed
+  | ValueTypeString
+  | ValueTypeArray
+  | ValueTypeObject
+  | ValueTypeNewId
 
 data Message = Message
   { messageObject :: ObjectId
   , messageOpcode :: Opcode
   , messagePayload :: [Value]
   }
+  deriving (Show)
 
 data DecodeError
   = NotEnoughBytes
   | InvalidMessageSize Word16
   | MessageTruncated
+  | DecodeHeaderFailed String
+  | DecodeArgFailed String
+  | InvalidString
+  | ExtraBytes
   deriving (Eq, Show)
 
 -- testEncode v = BS.length (BL.toStrict (B.toLazyByteString (encodeValue v))) == valueSize v
+testMessage :: Message
+testMessage =
+  Message
+    (ObjectId 3)
+    (Opcode 2)
+    [ ValueInt 3
+    , ValueString "Hello"
+    ]
 
-decodeMessageHeader :: ByteString -> Either DecodeError (ObjectId, Opcode, ByteString)
+decodeMessageHeader :: BL.ByteString -> Either DecodeError (ObjectId, Opcode, BL.ByteString)
 decodeMessageHeader bs
-  | BS.length bs < 8 = Left NotEnoughBytes
-  | otherwise = case runGetOrFail getHeader (BS.fromStrict bs) of
-      Left _ -> Left NotEnoughBytes
-      Right (remains, _, (obId, header)) ->
-        let size :: Word16 = fromIntegral $ header `shiftR` 16
-            code = Opcode $ fromIntegral $ header .&. 0xFFFF
-         in Right (obId, code, BL.toStrict remains)
+  | l < 8 = Left NotEnoughBytes
+  | otherwise = case runGetOrFail getHeader bs of
+      Left (_, _, str) -> Left $ DecodeHeaderFailed str
+      Right (_, _, (obId, sizeOpcode))
+        | size < 8 -> Left $ InvalidMessageSize size
+        | (fromIntegral size) > l -> Left MessageTruncated
+        | otherwise -> Right (obId, code, BL.take (fromIntegral size - 8) (BL.drop 8 bs))
+       where
+        size :: Word16
+        size = fromIntegral $ sizeOpcode `shiftR` 16
+        code :: Opcode
+        code = Opcode $ fromIntegral $ sizeOpcode .&. 0xFFFF
+ where
+  l = BL.length bs
+
+decodeValues :: [ValueType] -> BL.ByteString -> Either DecodeError [Value]
+decodeValues (t : ts) bs = do
+  (value, remains) <- decodeValue t bs
+  values <- decodeValues ts remains
+  pure (value : values)
+decodeValues [] bs
+  | BL.null bs = Right []
+  | otherwise = Left ExtraBytes
+
+decodeValue :: ValueType -> BL.ByteString -> Either DecodeError (Value, BL.ByteString)
+decodeValue ValueTypeInt bs = do
+  (i, remains) <- runDecoder getInt32le bs
+  pure (ValueInt i, remains)
+decodeValue ValueTypeUInt bs = do
+  (i, remains) <- runDecoder getWord32le bs
+  pure (ValueUInt i, remains)
+decodeValue ValueTypeFixed bs = do
+  (i, remains) <- runDecoder getInt32le bs
+  pure (ValueFixed i, remains)
+decodeValue ValueTypeObject bs = do
+  (i, remains) <- runDecoder getWord32le bs
+  pure (ValueObject (ObjectId i), remains)
+decodeValue ValueTypeNewId bs = do
+  (i, remains) <- runDecoder getWord32le bs
+  pure (ValueNewId (ObjectId i), remains)
+decodeValue ValueTypeArray bs = case runGetOrFail getWord32le bs of
+  Left (_, _, str) -> Left $ DecodeArgFailed str
+  Right (remainArray, _, i) -> case runGetOrFail (getByteString (pad4 $ fromIntegral i)) remainArray of
+    Left (_, _, str) -> Left $ DecodeArgFailed str
+    Right (remains, _, arr) -> Right (ValueArray (BS.take (fromIntegral i) arr), remains)
+decodeValue ValueTypeString bs = case runGetOrFail getWord32le bs of
+  Left (_, _, str) -> Left $ DecodeArgFailed str
+  Right (remains, _, 0) -> Right (ValueNullString, remains)
+  Right (remainStr, _, i) -> case runGetOrFail (getByteString (pad4 $ fromIntegral i)) remainStr of
+    Left (_, _, str) -> Left $ DecodeArgFailed str
+    Right (remains, _, b) -> case BS.unsnoc (BS.take (fromIntegral i) b) of
+      Just (str, 0) -> Right (ValueString (decodeUtf8Lenient str), remains)
+      _ -> Left InvalidString
+
+runDecoder :: Get a -> BL.ByteString -> Either DecodeError (a, BL.ByteString)
+runDecoder getter bs = case runGetOrFail getter bs of
+  Left (_, _, err) -> Left $ DecodeArgFailed err
+  Right (remains, _, value) -> Right (value, remains)
 
 getHeader :: Get (ObjectId, Word32)
 getHeader = do
@@ -67,9 +143,9 @@ getHeader = do
   header <- getWord32le
   pure (objectId, header)
 
-encodeMessage :: Message -> ByteString
+encodeMessage :: Message -> BL.ByteString
 encodeMessage (Message (ObjectId objId) (Opcode op) payload) =
-  BL.toStrict . B.toLazyByteString $ headerBuilder <> payloadBuilder
+  B.toLazyByteString $ headerBuilder <> payloadBuilder
  where
   payloadSizes = valueSize <$> payload
   totalPayloadSize = sum payloadSizes
