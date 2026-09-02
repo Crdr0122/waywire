@@ -20,16 +20,7 @@ data Message = Message
   }
   deriving (Show)
 
-data DecodeError
-  = NotEnoughBytes
-  | InvalidMessageSize Word16
-  | MessageTruncated
-  | DecodeHeaderFailed String
-  | DecodeArgFailed String
-  | InvalidString
-  | UnknownEventOpcode Word16
-  | ExtraBytes
-  deriving (Eq, Show)
+
 
 data DecodedEvent = DecodedEvent
   { decodedEvent :: Event

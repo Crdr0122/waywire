@@ -39,4 +39,16 @@ data ValueType
   | ValueTypeNewId
   | ValueTypeFd
 
+data DecodeError
+  = NotEnoughBytes
+  | InvalidMessageSize Word16
+  | MessageTruncated
+  | DecodeHeaderFailed String
+  | DecodeArgFailed String
+  | InvalidString
+  | UnknownEventOpcode Word16
+  | ValueToEventFailure
+  | ExtraBytes
+  deriving (Eq, Show)
+
 data Connection = Connection deriving (Eq, Show)

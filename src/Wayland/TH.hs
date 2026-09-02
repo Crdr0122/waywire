@@ -93,20 +93,33 @@ generateReq uName lName Request{reqName = n, reqArguments = args} = do
 generateIfaceEvents :: Interface -> Q [Dec]
 generateIfaceEvents Interface{ifaceName = n, ifaceEvents = events} = do
   let uName = unpack . toCamelU $ n
+      eventName = mkName (uName ++ "Event")
   (conList, funs) <- unzip <$> (sequence $ generateEvent uName <$> events)
-  dec <- dataD (cxt []) (mkName (uName ++ "Event")) [] Nothing conList []
-  pure [dec]
+  dec <- dataD (cxt []) eventName [] Nothing conList []
+  let clauses = zipWith (\i f -> f i) [0 ..] funs
+      fallBackClause = clause [wildP, wildP] (normalB $ (appE $ conE 'Left) $ conE 'ValueToEventFailure) []
+      decoderName = mkName ("decode" ++ uName ++ "Event")
+  decoders <- funD decoderName (clauses ++ [fallBackClause])
+  decoderSig <- sigD decoderName [t|Opcode -> [Value] -> Either DecodeError $(conT eventName)|]
+  pure [dec, decoderSig, decoders]
 
-generateEventDecoder :: [(Q Pat, Q Exp)] -> (TH.Name -> Int -> Q [Dec])
-generateEventDecoder l = (\n i -> [d||])
+generateEventDecoder :: TH.Name -> ([Q Pat], [Q Exp]) -> (Integer -> Q Clause)
+generateEventDecoder eName (pats, exps) =
+  ( \i -> do
+      let opcode = [p|Opcode $(litP (integerL i))|]
+          p = listP pats
+          e = foldl' appE (conE eName) exps
+      cl <- clause [opcode, p] (normalB $ (appE $ conE 'Right) $ e) []
+      pure cl
+  )
 
-generateEvent :: String -> Event -> Q (Q Con, TH.Name -> Int -> Q [Dec])
+generateEvent :: String -> Event -> Q (Q Con, Integer -> Q Clause)
 generateEvent uName Event{eventName = n, eventArguments = args} = do
   let eName = mkName . (uName ++) . unpack . toCamelU $ n
       argTypes = generateArgType <$> args
       argBangTypes = bangType (bang noSourceUnpackedness noSourceStrictness) <$> argTypes
   decodePats <- sequence $ generateDecodePattern <$> args
-  let funs = generateEventDecoder decodePats
+  let funs = generateEventDecoder eName $ unzip decodePats
   pure (normalC eName argBangTypes, funs)
 
 generateIfaceEnums :: Interface -> Q [Dec]
@@ -129,8 +142,8 @@ generateDecodePattern Argument{argType = t} = do
         TypeInt -> ([p|ValueInt $x|], varE nameX)
         TypeUInt -> ([p|ValueUInt $x|], varE nameX)
         TypeFixed -> ([p|ValueFixed $x|], varE nameX)
-        TypeString False -> ([p|ValueString $x|], varE nameX)
-        TypeString True -> ([p|ValueString (Just $x)|], varE nameX)
+        TypeString False -> ([p|ValueString (Just $x)|], varE nameX)
+        TypeString True -> ([p|ValueString $x|], varE nameX)
         TypeFileDescriptor -> ([p|ValueFd|], [|(-1)|])
         TypeArray -> ([p|ValueArray $x|], varE nameX)
         TypeObject _ _ -> ([p|ValueObject $x|], varE nameX)
