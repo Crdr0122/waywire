@@ -6,10 +6,11 @@ module Wayland where
 import Language.Haskell.TH
 import Text.XML
 import Text.XML.Cursor
-import Wayland.Object
+import Wayland.Encode
 import Wayland.Protocol
 import Wayland.Protocol.Parser
 import Wayland.TH
+import Wayland.Types
 
 $(testProtocol)
 

@@ -7,7 +7,7 @@ import Data.ByteString (ByteString)
 import Data.Char as C
 import Data.Int (Int32)
 import Data.List qualified as L
-import Data.Text (Text, cons, pack, splitOn, uncons, unpack)
+import Data.Text (Text, cons, splitOn, uncons, unpack)
 import Data.Text qualified as T
 import Data.Word (Word32)
 import Language.Haskell.TH as TH
@@ -15,9 +15,9 @@ import Language.Haskell.TH.Syntax (addDependentFile, lift)
 import System.Posix.Types (Fd)
 import Text.XML
 import Text.XML.Cursor
-import Wayland.Object
 import Wayland.Protocol
 import Wayland.Protocol.Parser
+import Wayland.Types
 
 transformFst :: (Char -> Char) -> T.Text -> T.Text
 transformFst f t = case uncons t of
@@ -35,7 +35,7 @@ toCamelU t = T.concat $ transformFst C.toUpper <$> splitOn "_" t
 toCamelL :: Text -> Text
 toCamelL t = transformFst C.toLower $ toCamelU t
 
-flattenQ :: [Q [Dec]] -> Q [Dec]
+flattenQ :: [Q [a]] -> Q [a]
 flattenQ = fmap concat . sequence
 
 notWrittenYetExp :: Q Exp
@@ -93,16 +93,21 @@ generateReq uName lName Request{reqName = n, reqArguments = args} = do
 generateIfaceEvents :: Interface -> Q [Dec]
 generateIfaceEvents Interface{ifaceName = n, ifaceEvents = events} = do
   let uName = unpack . toCamelU $ n
-      conList = generateEvent uName <$> events
+  (conList, funs) <- unzip <$> (sequence $ generateEvent uName <$> events)
   dec <- dataD (cxt []) (mkName (uName ++ "Event")) [] Nothing conList []
   pure [dec]
 
-generateEvent :: String -> Event -> Q Con
+generateEventDecoder :: [(Q Pat, Q Exp)] -> (TH.Name -> Int -> Q [Dec])
+generateEventDecoder l = (\n i -> [d||])
+
+generateEvent :: String -> Event -> Q (Q Con, TH.Name -> Int -> Q [Dec])
 generateEvent uName Event{eventName = n, eventArguments = args} = do
   let eName = mkName . (uName ++) . unpack . toCamelU $ n
       argTypes = generateArgType <$> args
       argBangTypes = bangType (bang noSourceUnpackedness noSourceStrictness) <$> argTypes
-  normalC eName argBangTypes
+  decodePats <- sequence $ generateDecodePattern <$> args
+  let funs = generateEventDecoder decodePats
+  pure (normalC eName argBangTypes, funs)
 
 generateIfaceEnums :: Interface -> Q [Dec]
 generateIfaceEnums Interface{ifaceName = n, ifaceEnums = enums} = do
@@ -115,6 +120,22 @@ generateEnum uName Enum'{enumName = n, enumEntries = entries} = do
       entryNames = ((\e -> normalC e []) . mkName . (eName ++) . unpack . toCamelU . enumEntryName) <$> entries
   dec <- dataD (cxt []) (mkName eName) [] Nothing entryNames []
   pure [dec]
+
+generateDecodePattern :: Argument -> Q (Q Pat, Q Exp)
+generateDecodePattern Argument{argType = t} = do
+  nameX <- newName "x"
+  let x = varP nameX
+      (r, e) = case t of
+        TypeInt -> ([p|ValueInt $x|], varE nameX)
+        TypeUInt -> ([p|ValueUInt $x|], varE nameX)
+        TypeFixed -> ([p|ValueFixed $x|], varE nameX)
+        TypeString False -> ([p|ValueString $x|], varE nameX)
+        TypeString True -> ([p|ValueString (Just $x)|], varE nameX)
+        TypeFileDescriptor -> ([p|ValueFd|], [|(-1)|])
+        TypeArray -> ([p|ValueArray $x|], varE nameX)
+        TypeObject _ _ -> ([p|ValueObject $x|], varE nameX)
+        TypeNewId _ -> ([p|ValueNewId $x|], varE nameX)
+  pure (r, e)
 
 generateArgType :: Argument -> Q Type
 generateArgType Argument{argType = t} = case t of

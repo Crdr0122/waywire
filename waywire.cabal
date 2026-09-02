@@ -45,7 +45,7 @@ common warnings
 library
   exposed-modules:
     Wayland
-    Wayland.Object
+    Wayland.Encode
     Wayland.Protocol
     Wayland.Protocol.Parser
     Wayland.Types

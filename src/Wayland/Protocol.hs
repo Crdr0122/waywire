@@ -1,9 +1,7 @@
 module Wayland.Protocol where
 
-import Data.Int (Int32)
 import Data.List (elemIndex)
 import Data.Text (Text)
-import Data.Word (Word32)
 
 data Protocol = Protocol
   { protoName :: Text
@@ -96,7 +94,6 @@ data EnumRef
   | ExternalEnum Text Text
   deriving (Eq, Show)
 
-
 isNewID :: Argument -> Bool
 isNewID Argument{argType = TypeNewId _} = True
 isNewID _ = False
@@ -110,4 +107,3 @@ eventOpCode :: Interface -> Event -> Int
 eventOpCode iface event = case elemIndex event (ifaceEvents iface) of
   Just n -> n
   Nothing -> error "event does not belong to interface"
-

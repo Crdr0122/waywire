@@ -1,6 +1,6 @@
 {-# LANGUAGE OverloadedStrings #-}
 
-module Wayland.Object where
+module Wayland.Encode where
 
 import Data.Binary
 import Data.Binary.Get
@@ -8,36 +8,10 @@ import Data.Bits (shiftR, (.&.))
 import Data.ByteString as BS
 import Data.ByteString.Builder qualified as B
 import Data.ByteString.Lazy qualified as BL
-import Data.Int
 import Data.List qualified as L
-import Data.Text as T
 import Data.Text.Encoding as TE
-import Data.Word
-import System.Posix.Types
 import Wayland.Protocol
 import Wayland.Types
-
-data Value
-  = ValueInt Int32
-  | ValueUInt Word32
-  | ValueFixed Fixed
-  | ValueString Text
-  | ValueNullString
-  | ValueArray ByteString
-  | ValueObject ObjectId
-  | ValueNewId ObjectId
-  | ValueFd
-  deriving (Show)
-
-data ValueType
-  = ValueTypeInt
-  | ValueTypeUInt
-  | ValueTypeFixed
-  | ValueTypeString
-  | ValueTypeArray
-  | ValueTypeObject
-  | ValueTypeNewId
-  | ValueTypeFd
 
 data Message = Message
   { messageObject :: ObjectId
@@ -86,7 +60,7 @@ testMessage =
     (ObjectId 3)
     (Opcode 2)
     [ ValueUInt 42
-    , ValueString "hello"
+    , ValueString (Just "hello")
     , ValueObject (ObjectId 7)
     , ValueArray "abc"
     ]
@@ -159,11 +133,11 @@ decodeValue ValueTypeArray bs = case runGetOrFail getWord32le bs of
     Right (remains, _, arr) -> Right (ValueArray (BS.take (fromIntegral i) arr), remains)
 decodeValue ValueTypeString bs = case runGetOrFail getWord32le bs of
   Left (_, _, str) -> Left $ DecodeArgFailed str
-  Right (remains, _, 0) -> Right (ValueNullString, remains)
+  Right (remains, _, 0) -> Right (ValueString Nothing, remains)
   Right (remainStr, _, i) -> case runGetOrFail (getByteString (pad4 $ fromIntegral i)) remainStr of
     Left (_, _, str) -> Left $ DecodeArgFailed str
     Right (remains, _, b) -> case BS.unsnoc (BS.take (fromIntegral i) b) of
-      Just (str, 0) -> Right (ValueString (decodeUtf8Lenient str), remains)
+      Just (str, 0) -> Right (ValueString (Just $ decodeUtf8Lenient str), remains)
       _ -> Left InvalidString
 
 runDecoder :: Get a -> BL.ByteString -> Either DecodeError (a, BL.ByteString)
@@ -199,10 +173,10 @@ valueSize (ValueFixed _) = 4
 valueSize (ValueObject _) = 4
 valueSize (ValueNewId _) = 4
 valueSize ValueFd = 0
-valueSize (ValueString txt) =
+valueSize (ValueString (Just txt)) =
   let len = BS.length (TE.encodeUtf8 txt) + 1 -- includes NUL terminator
    in 4 + pad4 len
-valueSize ValueNullString = 4
+valueSize (ValueString Nothing) = 4
 valueSize (ValueArray bs) =
   let len = BS.length bs
    in 4 + pad4 len
@@ -214,8 +188,8 @@ encodeValue (ValueFixed f) = B.int32LE f
 encodeValue (ValueObject (ObjectId o)) = B.word32LE o
 encodeValue (ValueNewId (ObjectId n)) = B.word32LE n
 encodeValue ValueFd = mempty
-encodeValue ValueNullString = B.word32LE 0
-encodeValue (ValueString txt) =
+encodeValue (ValueString Nothing) = B.word32LE 0
+encodeValue (ValueString (Just txt)) =
   let bs = TE.encodeUtf8 txt
       len = BS.length bs + 1 -- include NUL
       padLen = pad4 len - len
