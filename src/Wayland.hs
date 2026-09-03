@@ -17,6 +17,7 @@ $(testProtocol)
 main :: IO ()
 main = do
   putStrLn ""
-  print $ objectId display
+  print $ unObject display
 
-display = Object (ObjectId 1) Connection
+display :: Object WlDisplay
+display = Object (ObjectId 1)

@@ -1,3 +1,5 @@
+{-# LANGUAGE TypeFamilies #-}
+
 module Wayland.Types where
 
 import Data.ByteString (ByteString)
@@ -12,9 +14,8 @@ data NewObject -- TODO Placeholder for new_id
 data ObjectId = ObjectId Word32 deriving (Eq, Ord, Show)
 data Opcode = Opcode Word16 deriving (Eq, Ord, Show)
 
-data Object a = Object
-  { objectId :: ObjectId
-  , objectConnection :: Connection
+newtype Object a = Object
+  { unObject :: ObjectId
   }
   deriving (Eq, Show)
 
@@ -51,4 +52,12 @@ data DecodeError
   | ExtraBytes
   deriving (Eq, Show)
 
-data Connection = Connection deriving (Eq, Show)
+data Message = Message
+  { messageObject :: ObjectId
+  , messageOpcode :: Opcode
+  , messagePayload :: [Value]
+  }
+  deriving (Show)
+
+pad4 :: Int -> Int
+pad4 n = (n + 3) `div` 4 * 4

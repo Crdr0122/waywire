@@ -46,6 +46,7 @@ library
   exposed-modules:
     Wayland
     Wayland.Encode
+    Wayland.Decode
     Wayland.Protocol
     Wayland.Protocol.Parser
     Wayland.Types

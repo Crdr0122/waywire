@@ -1,8 +1,7 @@
 <?xml version="1.0"?>
 <protocol name="test">
   <interface name="wl_callback" version="1">
-    <request name="start">
-    </request>
+
   </interface>
   <interface name="wl_display" version="1">
     <request name="sync">

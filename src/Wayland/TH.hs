@@ -103,15 +103,13 @@ generateIfaceEvents Interface{ifaceName = n, ifaceEvents = events} = do
   decoderSig <- sigD decoderName [t|Opcode -> [Value] -> Either DecodeError $(conT eventName)|]
   pure [dec, decoderSig, decoders]
 
-generateEventDecoder :: TH.Name -> ([Q Pat], [Q Exp]) -> (Integer -> Q Clause)
-generateEventDecoder eName (pats, exps) =
-  ( \i -> do
-      let opcode = [p|Opcode $(litP (integerL i))|]
-          p = listP pats
-          e = foldl' appE (conE eName) exps
-      cl <- clause [opcode, p] (normalB $ (appE $ conE 'Right) $ e) []
-      pure cl
-  )
+generateEventDecoder :: TH.Name -> ([Q Pat], [Q Exp]) -> Integer -> Q Clause
+generateEventDecoder eName (pats, exps) i = do
+  let opcode = [p|Opcode $(litP (integerL i))|]
+      p = listP pats
+      e = foldl' appE (conE eName) exps
+  cl <- clause [opcode, p] (normalB $ (appE $ conE 'Right) $ e) []
+  pure cl
 
 generateEvent :: String -> Event -> Q (Q Con, Integer -> Q Clause)
 generateEvent uName Event{eventName = n, eventArguments = args} = do
