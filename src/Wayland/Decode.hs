@@ -20,10 +20,10 @@ data DecodedEvent = DecodedEvent
 decodeInterfaceEvent :: Interface -> Opcode -> BL.ByteString -> Either DecodeError DecodedEvent
 decodeInterfaceEvent iface opcode@(Opcode o) payload = do
   event <- maybe (Left $ UnknownEventOpcode o) Right $ eventAtOpcode iface opcode
-  decodeEventFromBs event payload
+  decodeEventFromBS event payload
 
-decodeEventFromBs :: Event -> BL.ByteString -> Either DecodeError DecodedEvent
-decodeEventFromBs e@Event{eventArguments = args} bs = do
+decodeEventFromBS :: Event -> BL.ByteString -> Either DecodeError DecodedEvent
+decodeEventFromBS e@Event{eventArguments = args} bs = do
   values <- decodeValues types bs
   pure $ DecodedEvent e values
  where
@@ -34,25 +34,6 @@ eventAtOpcode Interface{ifaceEvents = e} (Opcode o) = e L.!? (fromIntegral o)
 
 requestAtOpcode :: Interface -> Opcode -> Maybe Request
 requestAtOpcode Interface{ifaceRequests = r} (Opcode o) = r L.!? (fromIntegral o)
-
-testMessage :: Message
-testMessage =
-  Message
-    (ObjectId 3)
-    (Opcode 2)
-    [ ValueUInt 42
-    , ValueString (Just "hello")
-    , ValueObject (ObjectId 7)
-    , ValueArray "abc"
-    ]
-
-testTypes :: [ValueType]
-testTypes =
-  [ ValueTypeUInt
-  , ValueTypeString
-  , ValueTypeObject
-  , ValueTypeArray
-  ]
 
 argTypeToValueType :: ArgType -> ValueType
 argTypeToValueType TypeInt = ValueTypeInt

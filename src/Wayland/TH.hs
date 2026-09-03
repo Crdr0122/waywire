@@ -9,6 +9,7 @@ import Data.Int (Int32)
 import Data.List qualified as L
 import Data.Text (Text, cons, splitOn, uncons, unpack)
 import Data.Text qualified as T
+import Data.Typeable
 import Data.Word (Word32)
 import Language.Haskell.TH as TH
 import Language.Haskell.TH.Syntax (addDependentFile, lift)
@@ -19,36 +20,22 @@ import Wayland.Protocol
 import Wayland.Protocol.Parser
 import Wayland.Types
 
-transformFst :: (Char -> Char) -> T.Text -> T.Text
-transformFst f t = case uncons t of
-  Nothing -> ""
-  Just (c, t') -> cons (f c) t'
-
-transformFstStr :: (a -> a) -> [a] -> [a]
-transformFstStr f str = case str of
-  [] -> []
-  (x : xs) -> f x : xs
-
-toCamelU :: Text -> Text
-toCamelU t = T.concat $ transformFst C.toUpper <$> splitOn "_" t
-
-toCamelL :: Text -> Text
-toCamelL t = transformFst C.toLower $ toCamelU t
-
-flattenQ :: [Q [a]] -> Q [a]
-flattenQ = fmap concat . sequence
-
-notWrittenYetExp :: Q Exp
-notWrittenYetExp = [|error "not written yet"|]
+testProtocol :: Q [Dec]
+testProtocol = do
+  addDependentFile "files/test.xml"
+  fileContent <- runIO $ Text.XML.readFile def "files/test.xml"
+  case parseProtocol $ fromDocument fileContent of
+    Right a -> generateProtocol a
+    Left _ -> pure []
 
 generateProtocol :: Protocol -> Q [Dec]
 generateProtocol Protocol{protoInterfaces = ifaces} = do
   types <- flattenQ $ generateIfaceType <$> ifaces
-  nameFuns <- flattenQ $ generateIfaceName <$> ifaces
-  versionFuns <- flattenQ $ generateIfaceVersion <$> ifaces
-  reqs <- flattenQ $ generateIfaceReqs <$> ifaces
+  dispatcheRecords <- flattenQ $ generateIfaceDispatch <$> ifaces
   events <- flattenQ $ generateIfaceEvents <$> ifaces
-  pure $ types ++ nameFuns ++ versionFuns ++ reqs ++ events
+  reqs <- flattenQ $ generateIfaceReqs <$> ifaces
+  enums <- flattenQ $ generateIfaceEnums <$> ifaces
+  pure $ types ++ dispatcheRecords ++ reqs ++ events ++ enums
 
 generateIfaceType :: Interface -> Q [Dec]
 generateIfaceType Interface{ifaceName = n} = do
@@ -56,18 +43,17 @@ generateIfaceType Interface{ifaceName = n} = do
   dec <- dataD (cxt []) hsName [] Nothing [] []
   pure [dec]
 
-generateIfaceName :: Interface -> Q [Dec]
-generateIfaceName Interface{ifaceName = n} = do
-  let hsName = mkName . (++ "Name") . unpack . toCamelL $ n
-  sig <- sigD hsName [t|T.Text|]
-  dec <- funD hsName [clause [] (normalB . lift $ n) []]
-  pure [sig, dec]
-
-generateIfaceVersion :: Interface -> Q [Dec]
-generateIfaceVersion Interface{ifaceName = n, ifaceVersion = v} = do
-  let hsName = mkName . (++ "Version") . unpack . toCamelL $ n
-  sig <- sigD hsName [t|Int|]
-  dec <- funD hsName [clause [] (normalB . lift $ v) []]
+generateIfaceDispatch :: Interface -> Q [Dec]
+generateIfaceDispatch Interface{ifaceName = n, ifaceVersion = i} = do
+  let eName = mkName . (++ "Dispatch") . unpack . toCamelL $ n
+      dName = mkName . ("decode" ++) . (++ "Event") . unpack . toCamelU $ n
+      decodeField = fieldExp 'interfaceDecodeEvent (varE dName)
+      nameField = fieldExp 'interfaceName (litE . stringL . T.unpack $ n)
+      versionField = fieldExp 'interfaceVersion (litE . integerL . fromIntegral $ i)
+      encodeField = fieldExp 'interfaceEncodeRequest [|error "not implemented yet"|]
+      body = normalB (recConE 'InterfaceType [nameField, versionField, decodeField, encodeField])
+  sig <- sigD eName [t|InterfaceType|]
+  dec <- funD eName [clause [] body []]
   pure [sig, dec]
 
 generateIfaceReqs :: Interface -> Q [Dec]
@@ -84,7 +70,8 @@ generateReq uName lName Request{reqName = n, reqArguments = args} = do
       argTypes = uType : (generateArgType <$> rest)
       resultType = case newID of -- TODO Additional internal function that remembers where newID is
         [] -> [t|IO ()|]
-        x : _ -> [t|IO ($(generateArgType x))|]
+        [x] -> [t|IO ($(generateArgType x))|]
+        _ -> error "More than one new_id arg"
       argWithTypes = foldr (\arg res -> [t|$arg -> $res|]) resultType argTypes
   sig <- sigD rName argWithTypes
   fun <- funD rName [clause [] (normalB notWrittenYetExp) []]
@@ -95,12 +82,12 @@ generateIfaceEvents Interface{ifaceName = n, ifaceEvents = events} = do
   let uName = unpack . toCamelU $ n
       eventName = mkName (uName ++ "Event")
   (conList, funs) <- unzip <$> (sequence $ generateEvent uName <$> events)
-  dec <- dataD (cxt []) eventName [] Nothing conList []
+  dec <- dataD (cxt []) eventName [] Nothing conList [derivClause Nothing [conT ''Show, conT ''Typeable]]
   let clauses = zipWith (\i f -> f i) [0 ..] funs
       fallBackClause = clause [wildP, wildP] (normalB $ (appE $ conE 'Left) $ conE 'ValueToEventFailure) []
       decoderName = mkName ("decode" ++ uName ++ "Event")
   decoders <- funD decoderName (clauses ++ [fallBackClause])
-  decoderSig <- sigD decoderName [t|Opcode -> [Value] -> Either DecodeError $(conT eventName)|]
+  decoderSig <- sigD decoderName [t|Opcode -> [Value] -> Either DecodeError SomeEvent|]
   pure [dec, decoderSig, decoders]
 
 generateEventDecoder :: TH.Name -> ([Q Pat], [Q Exp]) -> Integer -> Q Clause
@@ -108,7 +95,8 @@ generateEventDecoder eName (pats, exps) i = do
   let opcode = [p|Opcode $(litP (integerL i))|]
       p = listP pats
       e = foldl' appE (conE eName) exps
-  cl <- clause [opcode, p] (normalB $ (appE $ conE 'Right) $ e) []
+  -- cl <- clause [opcode, p] (normalB $ (appE $ conE 'Right) $ e) []
+  cl <- clause [opcode, p] (normalB [|Right (SomeEvent $e)|]) []
   pure cl
 
 generateEvent :: String -> Event -> Q (Q Con, Integer -> Q Clause)
@@ -129,7 +117,7 @@ generateEnum :: String -> Enum' -> Q [Dec]
 generateEnum uName Enum'{enumName = n, enumEntries = entries} = do
   let eName = (uName ++) . unpack . toCamelU $ n
       entryNames = ((\e -> normalC e []) . mkName . (eName ++) . unpack . toCamelU . enumEntryName) <$> entries
-  dec <- dataD (cxt []) (mkName eName) [] Nothing entryNames []
+  dec <- dataD (cxt []) (mkName (eName ++ "Enum")) [] Nothing entryNames []
   pure [dec]
 
 generateDecodePattern :: Argument -> Q (Q Pat, Q Exp)
@@ -164,10 +152,24 @@ generateArgType Argument{argType = t} = case t of
  where
   uName = conT . mkName . unpack . toCamelU
 
-testProtocol :: Q [Dec]
-testProtocol = do
-  addDependentFile "files/test.xml"
-  fileContent <- runIO $ Text.XML.readFile def "files/test.xml"
-  case parseProtocol $ fromDocument fileContent of
-    Right a -> generateProtocol a
-    Left _ -> pure []
+transformFst :: (Char -> Char) -> T.Text -> T.Text
+transformFst f t = case uncons t of
+  Nothing -> ""
+  Just (c, t') -> cons (f c) t'
+
+transformFstStr :: (a -> a) -> [a] -> [a]
+transformFstStr f str = case str of
+  [] -> []
+  (x : xs) -> f x : xs
+
+toCamelU :: Text -> Text
+toCamelU t = T.concat $ transformFst C.toUpper <$> splitOn "_" t
+
+toCamelL :: Text -> Text
+toCamelL t = transformFst C.toLower $ toCamelU t
+
+flattenQ :: [Q [a]] -> Q [a]
+flattenQ = fmap concat . sequence
+
+notWrittenYetExp :: Q Exp
+notWrittenYetExp = [|error "not written yet"|]

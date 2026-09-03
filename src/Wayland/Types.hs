@@ -1,10 +1,12 @@
-{-# LANGUAGE TypeFamilies #-}
+{-# LANGUAGE OverloadedStrings #-}
 
 module Wayland.Types where
 
 import Data.ByteString (ByteString)
 import Data.Int
+import Data.Map (Map)
 import Data.Text (Text)
+import Data.Typeable
 import Data.Word
 
 type Fixed = Int32
@@ -59,5 +61,38 @@ data Message = Message
   }
   deriving (Show)
 
+type ObjectRegistry = Map ObjectId InterfaceType
+
+data SomeEvent where
+  SomeEvent :: (Typeable a, Show a) => a -> SomeEvent
+data SomeRequest where
+  SomeRequest :: (Typeable a, Show a) => a -> SomeRequest
+
+data InterfaceType = InterfaceType
+  { interfaceName :: Text
+  , interfaceVersion :: Int
+  , interfaceDecodeEvent :: Opcode -> [Value] -> Either DecodeError SomeEvent
+  , interfaceEncodeRequest :: SomeRequest -> ByteString
+  }
+
 pad4 :: Int -> Int
 pad4 n = (n + 3) `div` 4 * 4
+
+testMessage :: Message
+testMessage =
+  Message
+    (ObjectId 3)
+    (Opcode 2)
+    [ ValueUInt 42
+    , ValueString (Just "hello")
+    , ValueObject (ObjectId 7)
+    , ValueArray "abc"
+    ]
+
+testTypes :: [ValueType]
+testTypes =
+  [ ValueTypeUInt
+  , ValueTypeString
+  , ValueTypeObject
+  , ValueTypeArray
+  ]
