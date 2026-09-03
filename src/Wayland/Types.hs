@@ -8,6 +8,7 @@ import Data.Map (Map)
 import Data.Text (Text)
 import Data.Typeable
 import Data.Word
+import Network.Socket
 
 type Fixed = Int32
 
@@ -74,6 +75,19 @@ data InterfaceType = InterfaceType
   , interfaceDecodeEvent :: Opcode -> [Value] -> Either DecodeError SomeEvent
   , interfaceEncodeRequest :: SomeRequest -> ByteString
   }
+
+data Connection = Connection
+  { connSocket :: Socket
+  , connRegistry :: ObjectRegistry
+  , connNextObjectId :: Word32  -- For allocating new IDs
+  , connPendingObjects :: Map ObjectId InterfaceType
+  }
+
+allocateNewId :: Connection -> (ObjectId, Connection)
+allocateNewId conn = 
+  let newId = connNextObjectId conn
+      conn' = conn { connNextObjectId = newId + 1 }
+  in (ObjectId newId, conn')
 
 pad4 :: Int -> Int
 pad4 n = (n + 3) `div` 4 * 4

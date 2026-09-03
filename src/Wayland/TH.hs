@@ -65,7 +65,7 @@ generateIfaceReqs Interface{ifaceName = n, ifaceRequests = reqs} = do
 generateReq :: String -> String -> Request -> Q [Dec]
 generateReq uName lName Request{reqName = n, reqArguments = args} = do
   let rName = mkName . (lName ++) . unpack . toCamelU $ n
-      uType = conT (mkName uName)
+      uType = [t|Object $(conT $ mkName uName)|]
       (newID, rest) = L.partition isNewID args
       argTypes = uType : (generateArgType <$> rest)
       resultType = case newID of -- TODO Additional internal function that remembers where newID is
