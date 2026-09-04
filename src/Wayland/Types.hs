@@ -2,20 +2,25 @@
 
 module Wayland.Types where
 
+import Control.Concurrent.MVar
+import Control.Monad.Reader
 import Data.ByteString (ByteString)
+import Data.ByteString.Lazy qualified as BL
 import Data.Int
-import Data.Map (Map)
+import Data.Map (Map, insert)
 import Data.Text (Text)
 import Data.Typeable
 import Data.Word
 import Network.Socket
+import Network.Socket.ByteString.Lazy (sendAll)
+import System.Posix.Types (Fd)
 
 type Fixed = Int32
 
 data NewObject -- TODO Placeholder for new_id
 
-data ObjectId = ObjectId Word32 deriving (Eq, Ord, Show)
-data Opcode = Opcode Word16 deriving (Eq, Ord, Show)
+newtype ObjectId = ObjectId Word32 deriving (Eq, Ord, Show)
+newtype Opcode = Opcode Word16 deriving (Eq, Ord, Show)
 
 newtype Object a = Object
   { unObject :: ObjectId
@@ -30,7 +35,7 @@ data Value
   | ValueArray ByteString
   | ValueObject ObjectId
   | ValueNewId ObjectId
-  | ValueFd
+  | ValueFd Fd
   deriving (Show)
 
 data ValueType
@@ -59,6 +64,7 @@ data Message = Message
   { messageObject :: ObjectId
   , messageOpcode :: Opcode
   , messagePayload :: [Value]
+  , messageFd :: [Fd]
   }
   deriving (Show)
 
@@ -66,28 +72,37 @@ type ObjectRegistry = Map ObjectId InterfaceType
 
 data SomeEvent where
   SomeEvent :: (Typeable a, Show a) => a -> SomeEvent
-data SomeRequest where
-  SomeRequest :: (Typeable a, Show a) => a -> SomeRequest
 
 data InterfaceType = InterfaceType
   { interfaceName :: Text
   , interfaceVersion :: Int
   , interfaceDecodeEvent :: Opcode -> [Value] -> Either DecodeError SomeEvent
-  , interfaceEncodeRequest :: SomeRequest -> ByteString
   }
 
-data Connection = Connection
-  { connSocket :: Socket
-  , connRegistry :: ObjectRegistry
-  , connNextObjectId :: Word32  -- For allocating new IDs
-  , connPendingObjects :: Map ObjectId InterfaceType
+data Env = Env
+  { envRegistry :: MVar (Map ObjectId ObjectEntry)
+  , envIdAlloc :: MVar Word32
+  , envSocket :: MVar Socket
   }
+newtype ObjectEntry = ObjectEntry
+  {dispatchEvent :: Opcode -> ByteString -> Either String (W ())}
 
-allocateNewId :: Connection -> (ObjectId, Connection)
-allocateNewId conn = 
-  let newId = connNextObjectId conn
-      conn' = conn { connNextObjectId = newId + 1 }
-  in (ObjectId newId, conn')
+type W a = ReaderT Env IO a
+
+allocateNewId :: W ObjectId
+allocateNewId = do
+  i <- asks envIdAlloc
+  liftIO $ modifyMVar i (\x -> pure (x + 1, ObjectId (x + 1)))
+
+sendMessage :: BL.ByteString -> W ()
+sendMessage msg = do
+  s <- asks envSocket
+  liftIO $ withMVar s (`sendAll` msg)
+
+registerObject :: ObjectId -> ObjectEntry -> W ()
+registerObject oid entry = do
+  ref <- asks envRegistry
+  liftIO $ (modifyMVar_ ref $ pure . insert oid entry)
 
 pad4 :: Int -> Int
 pad4 n = (n + 3) `div` 4 * 4
@@ -102,6 +117,7 @@ testMessage =
     , ValueObject (ObjectId 7)
     , ValueArray "abc"
     ]
+    []
 
 testTypes :: [ValueType]
 testTypes =

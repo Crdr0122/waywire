@@ -45,8 +45,8 @@ common warnings
 library
   exposed-modules:
     Wayland
-    Wayland.Encode
     Wayland.Decode
+    Wayland.Encode
     Wayland.Protocol
     Wayland.Protocol.Parser
     Wayland.Types
@@ -61,7 +61,7 @@ library
     bytestring,
     containers,
     directory,
-    free,
+    mtl,
     network,
     template-haskell,
     text,

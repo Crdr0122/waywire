@@ -87,7 +87,7 @@ decodeValue ValueTypeObject bs = do
 decodeValue ValueTypeNewId bs = do
   (i, remains) <- runDecoder getWord32le bs
   pure (ValueNewId (ObjectId i), remains)
-decodeValue ValueTypeFd bs = pure (ValueFd, bs)
+decodeValue ValueTypeFd bs = pure (ValueFd (-1), bs)
 decodeValue ValueTypeArray bs = case runGetOrFail getWord32le bs of
   Left (_, _, str) -> Left $ DecodeArgFailed str
   Right (remainArray, _, i) -> case runGetOrFail (getByteString (pad4 $ fromIntegral i)) remainArray of

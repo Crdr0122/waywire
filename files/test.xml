@@ -6,6 +6,7 @@
     <request name="sync">
       <arg name="callback" type="new_id" interface="wl_callback"/>
       <arg name="test_int" type="int"/>
+      <arg name="files" type="fd"/>
     </request>
     <event name="appeared">
       <arg name="appear_timing" type="uint"/>
