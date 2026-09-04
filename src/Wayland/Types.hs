@@ -68,8 +68,6 @@ data Message = Message
   }
   deriving (Show)
 
-type ObjectRegistry = Map ObjectId InterfaceType
-
 data SomeEvent where
   SomeEvent :: (Typeable a, Show a) => a -> SomeEvent
 
@@ -84,6 +82,7 @@ data Env = Env
   , envIdAlloc :: MVar Word32
   , envSocket :: MVar Socket
   }
+
 newtype ObjectEntry = ObjectEntry
   {dispatchEvent :: Opcode -> ByteString -> Either String (W ())}
 

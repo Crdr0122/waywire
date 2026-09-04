@@ -3,8 +3,6 @@
 
 module Wayland.TH where
 
-import Control.Monad.IO.Class (liftIO)
-import Control.Monad.Reader (asks)
 import Data.ByteString (ByteString)
 import Data.Char as C
 import Data.Int (Int32)
@@ -16,7 +14,6 @@ import Data.Typeable
 import Data.Word (Word32)
 import Language.Haskell.TH as TH
 import Language.Haskell.TH.Syntax (addDependentFile)
-import Network.Socket.ByteString.Lazy (sendAll)
 import System.Posix.Types (Fd)
 import Text.XML
 import Text.XML.Cursor
@@ -36,17 +33,19 @@ testProtocol = do
 generateProtocol :: Protocol -> Q [Dec]
 generateProtocol Protocol{protoInterfaces = ifaces} = do
   types <- flattenQ $ generateIfaceType <$> ifaces
-  dispatcheRecords <- flattenQ $ generateIfaceDispatch <$> ifaces
   events <- flattenQ $ generateIfaceEvents <$> ifaces
   reqs <- flattenQ $ generateIfaceReqs <$> ifaces
   enums <- flattenQ $ generateIfaceEnums <$> ifaces
-  pure $ types ++ dispatcheRecords ++ reqs ++ events ++ enums
+  pure $ types ++ reqs ++ events ++ enums
 
 generateIfaceType :: Interface -> Q [Dec]
 generateIfaceType Interface{ifaceName = n} = do
   let hsName = mkName . unpack . toCamelU $ n
   dec <- dataD (cxt []) hsName [] Nothing [] []
   pure [dec]
+
+-- generateHandlerType
+-- generateObjectEntryCreator
 
 generateIfaceDispatch :: Interface -> Q [Dec]
 generateIfaceDispatch Interface{ifaceName = n, ifaceVersion = i} = do
@@ -98,20 +97,17 @@ generateEncoder opcode position args = do
             do
               let m = Message (unObject ob) (Opcode opcode) $(listE resBody) []
                   bs = encodeMessage m
-              socket <- asks connSocket
-              liftIO $ sendAll socket bs
+              sendMessage bs
               pure $res
             |]
   clause p body []
 
--- encodeWlDisplaySyncRequest :: Object WlDisplay -> Int32 -> Object WlCallback -> IO Message
--- encodeWlDisplaySyncRequest display testInt callback =
---   pure $
---     Message
---       (unObject display) -- Use the actual object ID
---       (Opcode 0)
---       [ValueNewId (unObject callback), ValueInt testInt]
---       []
+-- createSurface :: WlCompositor -> WlSurfaceHandlers -> Wire WlSurface
+-- createSurface (WlCompositor self) handlers = do
+--   newId <- allocateNewId
+--   registerObject newId (mkWlSurfaceEntry handlers)
+--   sendMessage (encodeRequest self 0 [ArgNewId newId])
+--   pure (WlSurface newId)
 
 generateIfaceEvents :: Interface -> Q [Dec]
 generateIfaceEvents Interface{ifaceName = n, ifaceEvents = events} = do
