@@ -1,4 +1,6 @@
 {-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE TypeFamilies #-}
+{-# LANGUAGE TypeFamilyDependencies #-}
 
 module Wayland.Types where
 
@@ -7,9 +9,10 @@ import Control.Monad.Reader
 import Data.ByteString (ByteString)
 import Data.ByteString.Lazy qualified as BL
 import Data.Int
+import Data.Kind (Type)
 import Data.Map (Map, insert)
+import Data.Proxy (Proxy)
 import Data.Text (Text)
-import Data.Typeable
 import Data.Word
 import Network.Socket
 import Network.Socket.ByteString.Lazy (sendAll)
@@ -35,6 +38,7 @@ data Value
   | ValueArray ByteString
   | ValueObject ObjectId
   | ValueNewId ObjectId
+  | ValueNewIdUntyped Text Word32 ObjectId
   | ValueFd Fd
   deriving (Show)
 
@@ -68,14 +72,18 @@ data Message = Message
   }
   deriving (Show)
 
-data SomeEvent where
-  SomeEvent :: (Typeable a, Show a) => a -> SomeEvent
-
-data InterfaceType = InterfaceType
-  { interfaceName :: Text
-  , interfaceVersion :: Int
-  , interfaceDecodeEvent :: Opcode -> [Value] -> Either DecodeError SomeEvent
-  }
+{- | Every generated interface marker type (WlSurface, WlCompositor, ...)
+gets an instance of this. 'Handlers' is declared injective (@r -> a@)
+so that passing a concrete handler record (e.g. a 'WlSurfaceHandlers')
+to 'mkEntry' or to a polymorphic request like bind is enough for GHC
+to infer which interface @a@ we mean -- no Proxy or TypeApplications
+needed at ordinary call sites.
+-}
+class InterfaceType a where
+  type Handlers a = (r :: Type) | r -> a
+  ifaceNameT :: Proxy a -> Text
+  ifaceVersionT :: Proxy a -> Int
+  mkEntry :: Handlers a -> ObjectEntry
 
 data Env = Env
   { envRegistry :: MVar (Map ObjectId ObjectEntry)
@@ -84,7 +92,7 @@ data Env = Env
   }
 
 newtype ObjectEntry = ObjectEntry
-  {dispatchEvent :: Opcode -> ByteString -> Either String (W ())}
+  {dispatchEvent :: Opcode -> ByteString -> Either DecodeError (W ())}
 
 type W a = ReaderT Env IO a
 
@@ -93,10 +101,12 @@ allocateNewId = do
   i <- asks envIdAlloc
   liftIO $ modifyMVar i (\x -> pure (x + 1, ObjectId (x + 1)))
 
-sendMessage :: BL.ByteString -> W ()
-sendMessage msg = do
+sendMessage :: (BL.ByteString, [Fd]) -> W ()
+sendMessage (msg, fds) = do
   s <- asks envSocket
-  liftIO $ withMVar s (`sendAll` msg)
+  liftIO $ withMVar s $ \soc -> do
+    soc `sendAll` msg
+    mapM_ (sendFd soc . fromIntegral) fds
 
 registerObject :: ObjectId -> ObjectEntry -> W ()
 registerObject oid entry = do
@@ -105,23 +115,3 @@ registerObject oid entry = do
 
 pad4 :: Int -> Int
 pad4 n = (n + 3) `div` 4 * 4
-
-testMessage :: Message
-testMessage =
-  Message
-    (ObjectId 3)
-    (Opcode 2)
-    [ ValueUInt 42
-    , ValueString (Just "hello")
-    , ValueObject (ObjectId 7)
-    , ValueArray "abc"
-    ]
-    []
-
-testTypes :: [ValueType]
-testTypes =
-  [ ValueTypeUInt
-  , ValueTypeString
-  , ValueTypeObject
-  , ValueTypeArray
-  ]

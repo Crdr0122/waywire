@@ -6,11 +6,12 @@ import Data.ByteString as BS
 import Data.ByteString.Builder qualified as B
 import Data.ByteString.Lazy qualified as BL
 import Data.Text.Encoding as TE
+import System.Posix.Types (Fd)
 import Wayland.Types
 
-encodeMessage :: Message -> BL.ByteString
-encodeMessage (Message (ObjectId objId) (Opcode op) payload _) =
-  B.toLazyByteString $ headerBuilder <> payloadBuilder
+encodeMessage :: Message -> (BL.ByteString, [Fd])
+encodeMessage (Message (ObjectId objId) (Opcode op) payload fds) =
+  (B.toLazyByteString $ headerBuilder <> payloadBuilder, fds)
  where
   payloadSizes = valueSize <$> payload
   totalPayloadSize = sum payloadSizes
@@ -30,13 +31,15 @@ valueSize (ValueFixed _) = 4
 valueSize (ValueObject _) = 4
 valueSize (ValueNewId _) = 4
 valueSize (ValueFd _) = 0
+valueSize (ValueString Nothing) = 4
 valueSize (ValueString (Just txt)) =
   let len = BS.length (TE.encodeUtf8 txt) + 1 -- includes NUL terminator
    in 4 + pad4 len
-valueSize (ValueString Nothing) = 4
 valueSize (ValueArray bs) =
   let len = BS.length bs
    in 4 + pad4 len
+valueSize (ValueNewIdUntyped iface _version _newId) =
+  valueSize (ValueString (Just iface)) + 4 + 4
 
 encodeValue :: Value -> B.Builder
 encodeValue (ValueInt i) = B.int32LE i
@@ -60,3 +63,7 @@ encodeValue (ValueArray bs) =
    in B.word32LE (fromIntegral len)
         <> B.byteString bs
         <> B.byteString (BS.replicate padLen 0)
+encodeValue (ValueNewIdUntyped iface version (ObjectId newId)) =
+  encodeValue (ValueString (Just iface))
+    <> B.word32LE version
+    <> B.word32LE newId

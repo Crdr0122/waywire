@@ -1,26 +1,33 @@
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE TemplateHaskell #-}
+{-# LANGUAGE TypeFamilies #-}
 
 module Wayland.TH where
 
 import Data.ByteString (ByteString)
+import Data.ByteString.Lazy qualified as BL
 import Data.Char as C
 import Data.Int (Int32)
-import Data.List (findIndex)
+import Data.List (findIndex, findIndices)
 import Data.List qualified as L
+import Data.Proxy
 import Data.Text (Text, cons, splitOn, uncons, unpack)
 import Data.Text qualified as T
-import Data.Typeable
 import Data.Word (Word32)
 import Language.Haskell.TH as TH
 import Language.Haskell.TH.Syntax (addDependentFile)
 import System.Posix.Types (Fd)
 import Text.XML
 import Text.XML.Cursor
+import Wayland.Decode (decodeValues)
 import Wayland.Encode (encodeMessage)
 import Wayland.Protocol
 import Wayland.Protocol.Parser
 import Wayland.Types
+
+-- TODO Enum Args
+-- TODO File Descriptors
+--
 
 testProtocol :: Q [Dec]
 testProtocol = do
@@ -36,28 +43,216 @@ generateProtocol Protocol{protoInterfaces = ifaces} = do
   events <- flattenQ $ generateIfaceEvents <$> ifaces
   reqs <- flattenQ $ generateIfaceReqs <$> ifaces
   enums <- flattenQ $ generateIfaceEnums <$> ifaces
-  pure $ types ++ reqs ++ events ++ enums
+  instances <- flattenQ $ generateIfaceInstance <$> ifaces
+  pure $ types ++ events ++ reqs ++ instances ++ enums
 
+{- | The empty marker type for an interface, e.g. @data WlSurface@.
+|Used only as the phantom parameter of 'Object' and 'Handlers'.
+-}
 generateIfaceType :: Interface -> Q [Dec]
 generateIfaceType Interface{ifaceName = n} = do
   let hsName = mkName . unpack . toCamelU $ n
   dec <- dataD (cxt []) hsName [] Nothing [] []
   pure [dec]
 
--- generateHandlerType
--- generateObjectEntryCreator
+--------------------------------------------------------------------------------
+-- Events: one handler record + one fused decode-and-dispatch function
+-- per interface. No event ADT, no SomeEvent, no Typeable.
+--------------------------------------------------------------------------------
 
-generateIfaceDispatch :: Interface -> Q [Dec]
-generateIfaceDispatch Interface{ifaceName = n, ifaceVersion = i} = do
-  let eName = mkName . (++ "Dispatch") . unpack . toCamelL $ n
-      dName = mkName . ("decode" ++) . (++ "Event") . unpack . toCamelU $ n
-      decodeField = fieldExp 'interfaceDecodeEvent (varE dName)
-      nameField = fieldExp 'interfaceName (litE . stringL . T.unpack $ n)
-      versionField = fieldExp 'interfaceVersion (litE . integerL . fromIntegral $ i)
-      body = normalB (recConE 'InterfaceType [nameField, versionField, decodeField])
-  sig <- sigD eName [t|InterfaceType|]
-  dec <- funD eName [clause [] body []]
-  pure [sig, dec]
+{- | For a given interface, generates:
+
+> data WlSurfaceHandlers = WlSurfaceHandlers
+>   { onWlSurfaceEnter :: Object WlOutput -> W ()
+>   , onWlSurfaceLeave :: Object WlOutput -> W ()
+>   }
+>
+> dispatchWlSurface :: WlSurfaceHandlers -> Opcode -> ByteString -> Either DecodeError (W ())
+> dispatchWlSurface handlers (Opcode 0) bs = do
+>   values <- decodeValues [ValueTypeObject] (BL.fromStrict bs)
+>   case values of
+>     [ValueObject x] -> Right (onWlSurfaceEnter handlers (Object x))
+>     _ -> Left ValueToEventFailure
+> ...
+> dispatchWlSurface _ (Opcode o) _ = Left (UnknownEventOpcode o)
+>
+> mkWlSurfaceEntry :: WlSurfaceHandlers -> ObjectEntry
+> mkWlSurfaceEntry = ObjectEntry . dispatchWlSurface
+
+Events with a new_id argument of known interface (e.g. wl_data_device's
+data_offer) instead get a handler field of type
+@Object Child -> ...otherArgs... -> W (Handlers Child)@, and the
+generated dispatch clause registers the child object for you:
+
+> [ValueNewId newId, ...] -> Right $ do
+>   h <- onWlDataDeviceDataOffer handlers (Object newId) ...
+>   registerObject newId (mkEntry h)
+-}
+generateIfaceEvents :: Interface -> Q [Dec]
+generateIfaceEvents Interface{ifaceName = n, ifaceEvents = events} = do
+  let uName = unpack . toCamelU $ n
+      handlersName = mkName (uName ++ "Handlers")
+      dispatchName = mkName ("dispatch" ++ uName)
+      mkEntryName = mkName ("mk" ++ uName ++ "Entry")
+
+  fields <- sequence $ generateHandlerField uName <$> events
+  handlersDec <- dataD (cxt []) handlersName [] Nothing [recC handlersName (pure <$> fields)] []
+
+  let clauses = zipWith (generateEventClause uName) [0 ..] events
+      fallback = generateFallbackClause
+  dispatchSig <- sigD dispatchName [t|$(conT handlersName) -> Opcode -> ByteString -> Either DecodeError (W ())|]
+  dispatchFun <- funD dispatchName (clauses ++ [fallback])
+
+  mkEntrySig <- sigD mkEntryName [t|$(conT handlersName) -> ObjectEntry|]
+  mkEntryFun <- funD mkEntryName [clause [] (normalB [|ObjectEntry . $(varE dispatchName)|]) []]
+
+  pure [handlersDec, dispatchSig, dispatchFun, mkEntrySig, mkEntryFun]
+
+-- | Build one record field for the handlers type. eg. onWlSurfaceEnter
+generateHandlerField :: String -> Event -> Q VarBangType
+generateHandlerField uName Event{eventName = n, eventArguments = args} = do
+  let fieldName = mkName ("on" ++ uName ++ (unpack . toCamelU $ n))
+  varBangType
+    fieldName
+    (bangType (bang noSourceUnpackedness noSourceStrictness) (generateHandlerFieldType args))
+
+{- | Non-spawning event: @arg1 -> arg2 -> ... -> W ()@.
+Spawning event (one new_id arg with a known interface): the new
+object is passed first, and the result is @W (Handlers Child)@ so
+the dispatch clause knows what to register.
+-}
+generateHandlerFieldType :: [Argument] -> Q Type
+generateHandlerFieldType args = case findNewIdArg args of
+  Nothing -> buildArrow (generateArgType <$> args) [t|W ()|]
+  Just (childIfaceText, otherArgs) ->
+    let childTy = conT (mkName . unpack . toCamelU $ childIfaceText)
+        argTys = [t|Object $childTy|] : (generateArgType <$> otherArgs)
+     in buildArrow argTys [t|W (Handlers $childTy)|]
+
+{- | Finds the single new_id-with-known-interface argument, if any,
+and returns it along with the remaining arguments in their
+original relative order. Errors (at generation time) if there's
+more than one, or if there's a new_id with no interface -- the
+latter is only valid in requests (wl_registry.bind), never events.
+-}
+findNewIdArg :: [Argument] -> Maybe (Text, [Argument])
+findNewIdArg args = case [(t, a) | a@Argument{argType = TypeNewId (Just t)} <- args] of
+  [] -> Nothing
+  [(t, spawnArg)] -> Just (t, L.delete spawnArg args)
+  _ -> error "waywire: multiple new_id arguments in a single event is not supported"
+
+-- | One clause of 'dispatchWlSurface' for one event/opcode.
+generateEventClause :: String -> Integer -> Event -> Q Clause
+generateEventClause uName i Event{eventName = n, eventArguments = args} = do
+  handlersName <- newName "handlers"
+  bsName <- newName "bs"
+  valuesName <- newName "values"
+  decodePats <- sequence $ generateDecodePattern <$> args
+  let (valuePats, varNames) = unzip decodePats
+      fieldName = mkName ("on" ++ uName ++ (unpack . toCamelU $ n))
+      valueTypesExp = listE (generateValueTypeExp . argType <$> args)
+      bodyExp = generateEventBody fieldName args varNames handlersName
+  let matchOk = TH.match (listP valuePats) (normalB bodyExp) []
+      matchFallback = TH.match wildP (normalB [|Left ValueToEventFailure|]) []
+      decodeStmt = bindS (varP valuesName) [|decodeValues $valueTypesExp (BL.fromStrict $(varE bsName))|]
+      caseStmt = noBindS (caseE (varE valuesName) [matchOk, matchFallback])
+  clause
+    [varP handlersName, conP 'Opcode [litP (integerL i)], varP bsName]
+    (normalB (doE [decodeStmt, caseStmt]))
+    []
+
+{- | Builds the @Right (onXEvent handlers arg1 arg2 ...)@ or, for a
+spawning event, the @Right (do { h <- onXEvent handlers (Object newId)
+...; registerObject newId (mkEntry h) })@ body. Decoded object
+arguments come back as raw 'ObjectId's from 'decodeValues', so any
+argument whose handler-field type is @Object iface@ gets wrapped
+here to match.
+-}
+generateEventBody :: TH.Name -> [Argument] -> [TH.Name] -> TH.Name -> Q Exp
+generateEventBody fieldName args varNames handlersName =
+  case newIdIndex of
+    Nothing ->
+      let argExps = zipWith wrapArgExp args varNames
+          applyHandler = foldl' appE (appE (varE fieldName) (varE handlersName)) argExps
+       in [|Right $applyHandler|]
+    Just idx ->
+      let newIdVar = varNames !! idx
+          otherArgs = [a | (j, a) <- zip [0 :: Int ..] args, j /= idx]
+          otherVars = [v | (j, v) <- zip [0 :: Int ..] varNames, j /= idx]
+          argExps = [|Object $(varE newIdVar)|] : zipWith wrapArgExp otherArgs otherVars
+          applyHandler = foldl' appE (appE (varE fieldName) (varE handlersName)) argExps
+       in [|
+            Right $ do
+              h <- $applyHandler
+              registerObject $(varE newIdVar) (mkEntry h)
+            |]
+ where
+  newIdIndex = case [i | (i, a) <- zip [0 :: Int ..] args, isSpawning a] of
+    [] -> Nothing
+    [i] -> Just i
+    _ -> error "waywire: multiple new_id arguments in a single event is not supported"
+  isSpawning Argument{argType = TypeNewId (Just _)} = True
+  isSpawning _ = False
+
+{- | 'decodeValues' always hands back a raw 'ObjectId' for both
+ValueObject and ValueNewId; wrap it in 'Object' wherever the
+handler-field type (built by 'generateArgType') expects that.
+-}
+wrapArgExp :: Argument -> TH.Name -> Q Exp
+wrapArgExp Argument{argType = TypeObject _ _} v = [|Object $(varE v)|]
+wrapArgExp _ v = varE v
+
+-- Fallback clause
+generateFallbackClause :: Q Clause
+generateFallbackClause = do
+  oName <- newName "o"
+  clause
+    [wildP, conP 'Opcode [varP oName], wildP]
+    (normalB [|Left (UnknownEventOpcode $(varE oName))|])
+    []
+
+generateValueTypeExp :: ArgType -> Q Exp
+generateValueTypeExp t =
+  conE $ case t of
+    TypeInt -> 'ValueTypeInt
+    TypeUInt -> 'ValueTypeUInt
+    TypeFixed -> 'ValueTypeFixed
+    TypeString _ -> 'ValueTypeString
+    TypeArray -> 'ValueTypeArray
+    TypeFileDescriptor -> 'ValueTypeFd
+    TypeObject _ _ -> 'ValueTypeObject
+    TypeNewId _ -> 'ValueTypeNewId
+
+--------------------------------------------------------------------------------
+-- Interface instances
+--------------------------------------------------------------------------------
+
+{- | > instance Interface WlSurface where
+  >   type Handlers WlSurface = WlSurfaceHandlers
+  >   ifaceNameT _ = "wl_surface"
+  >   ifaceVersionT _ = 5
+  >   mkEntry = mkWlSurfaceEntry
+-}
+generateIfaceInstance :: Interface -> Q [Dec]
+generateIfaceInstance Interface{ifaceName = n, ifaceVersion = v} = do
+  let uName = unpack . toCamelU $ n
+      ifaceTy = conT (mkName uName)
+      handlersTy = conT (mkName (uName ++ "Handlers"))
+      mkEntryName = mkName ("mk" ++ uName ++ "Entry")
+  tyInst <- tySynInstD (tySynEqn Nothing [t|Handlers $ifaceTy|] handlersTy)
+  nameImpl <- funD 'ifaceNameT [clause [wildP] (normalB (litE (stringL (T.unpack n)))) []]
+  versionImpl <- funD 'ifaceVersionT [clause [wildP] (normalB (litE (integerL (fromIntegral v)))) []]
+  mkEntryImpl <- funD 'mkEntry [clause [] (normalB (varE mkEntryName)) []]
+  inst <-
+    instanceD
+      (cxt [])
+      [t|InterfaceType $ifaceTy|]
+      [pure tyInst, pure nameImpl, pure versionImpl, pure mkEntryImpl]
+  pure [inst]
+
+--------------------------------------------------------------------------------
+-- Requests
+--------------------------------------------------------------------------------
 
 generateIfaceReqs :: Interface -> Q [Dec]
 generateIfaceReqs Interface{ifaceName = n, ifaceRequests = reqs} = do
@@ -65,79 +260,137 @@ generateIfaceReqs Interface{ifaceName = n, ifaceRequests = reqs} = do
       lName = transformFstStr C.toLower uName
   flattenQ $ zipWith (generateReq uName lName) [0 ..] reqs
 
+{- | Dispatches to one of three shapes depending on the request's
+new_id argument (if any):
+
+  * no new_id             -> plain request, returns @W ()@
+  * new_id, known iface   -> allocates + registers + returns @W (Object Child)@
+  * new_id, no iface      -> bind-style: polymorphic in the caller-chosen
+                             interface, takes an explicit version
+-}
 generateReq :: String -> String -> Int -> Request -> Q [Dec]
 generateReq uName lName opcode Request{reqName = n, reqArguments = args} = do
-  let rName = mkName . (lName ++) . unpack . toCamelU $ n
-      uType = [t|Object $(conT $ mkName uName)|]
-      (newID, rest) = L.partition isNewID args
+  let rName = mkName (lName ++ (unpack . toCamelU $ n))
+      (newIdArgs, restArgs) = L.partition isNewID args
       position = findIndex isNewID args
-      argTypes = uType : (generateArgType <$> rest)
-      resultType = case newID of -- TODO Additional internal function that remembers where newID is
-        [] -> [t|W ()|]
-        [x] -> [t|W ($(generateArgType x))|]
-        _ -> error "More than one new_id arg"
-      argWithTypes = foldr (\arg res -> [t|$arg -> $res|]) resultType argTypes
-  sig <- sigD rName argWithTypes
-  fun <- funD rName [generateEncoder opcode position rest]
+  case (position, newIdArgs) of
+    (Nothing, _) -> do
+      sig <- sigD rName (generateSimpleReqType uName args)
+      fun <- funD rName [generateSimpleClause opcode args]
+      pure [sig, fun]
+    (Just i, [Argument{argType = TypeNewId (Just childIfaceText)}]) -> do
+      sig <- sigD rName (generateSpawnReqType uName childIfaceText restArgs)
+      fun <- funD rName [generateSpawnClause opcode i childIfaceText restArgs]
+      pure [sig, fun]
+    (Just i, [Argument{argType = TypeNewId Nothing}]) ->
+      generateBindReq rName uName opcode i restArgs
+    -- pure []
+    _ -> error "waywire: multiple new_id arguments in a single request is not supported"
+
+generateSimpleReqType :: String -> [Argument] -> Q Type
+generateSimpleReqType uName args = buildArrow ([t|Object $(conT (mkName uName))|] : (generateArgType <$> args)) [t|W ()|]
+
+generateSimpleClause :: Int -> [Argument] -> Q Clause
+generateSimpleClause opcode args = do
+  selfName <- newName "self"
+  encoded <- sequence (generateEncodePattern <$> args)
+  let (valueExps, argNames) = unzip encoded
+      fds = generateFdList args argNames
+      pats = varP selfName : (varP <$> argNames)
+      msgExp = [|Message (unObject $(varE selfName)) (Opcode opcode) $(listE valueExps) $fds|]
+  clause pats (normalB [|sendMessage (encodeMessage $msgExp)|]) []
+
+generateSpawnReqType :: String -> Text -> [Argument] -> Q Type
+generateSpawnReqType uName childIfaceText restArgs =
+  let childTy = conT (mkName . unpack . toCamelU $ childIfaceText)
+      selfTy = conT (mkName uName)
+      handlersTy = [t|Handlers $childTy|]
+   in buildArrow
+        ([t|Object $selfTy|] : (generateArgType <$> restArgs) ++ [handlersTy])
+        [t|W (Object $childTy)|]
+
+{- | createSurface self ...otherArgs... handlers = do
+    newId <- allocateNewId
+    registerObject newId (mkEntry handlers)
+    sendMessage (encodeMessage (Message (unObject self) (Opcode opcode) [..args with ValueNewId newId spliced back in..] []))
+    pure (Object newId)
+-}
+generateSpawnClause :: Int -> Int -> Text -> [Argument] -> Q Clause
+generateSpawnClause opcode newIdPos _childIfaceText restArgs = do
+  selfName <- newName "self"
+  handlersName <- newName "handlers"
+  newIdName <- newName "newId"
+  encoded <- sequence (generateEncodePattern <$> restArgs)
+  let (restExps, restNames) = unzip encoded
+      fds = generateFdList restArgs restNames
+      pats = varP selfName : (varP <$> restNames) ++ [varP handlersName]
+      newIdValueExp = [|ValueNewId $(varE newIdName)|]
+      allExps = insertAt newIdPos newIdValueExp restExps
+      bodyStmts =
+        [ bindS (varP newIdName) [|allocateNewId|]
+        , noBindS [|registerObject $(varE newIdName) (mkEntry $(varE handlersName))|]
+        , noBindS [|sendMessage (encodeMessage (Message (unObject $(varE selfName)) (Opcode opcode) $(listE allExps) $fds))|]
+        , noBindS [|pure (Object $(varE newIdName))|]
+        ]
+  clause pats (normalB (doE bodyStmts)) []
+
+{- | bindWlRegistryBind :: forall i. Interface i =>
+    Object WlRegistry -> Word32 {\- name -\} -> Word32 {\- version -\} -> Handlers i -> W (Object i)
+bindWlRegistryBind self name version handlers = do
+  newId <- allocateNewId
+  registerObject newId (mkEntry handlers)
+  sendMessage (encodeMessage (Message (unObject self) (Opcode opcode)
+    [ValueUInt name, ValueNewIdUntyped (ifaceNameT (Proxy :: Proxy i)) version newId] []))
+  pure (Object newId)
+-}
+generateBindReq :: TH.Name -> String -> Int -> Int -> [Argument] -> Q [Dec]
+generateBindReq rName uName opcode newIdPos restArgs = do
+  iName <- newName "i"
+  selfName <- newName "self"
+  versionName <- newName "version"
+  newIdName <- newName "newId"
+  handlersName <- newName "handlers"
+  encoded <- sequence (generateEncodePattern <$> restArgs)
+  let (restExps, restNames) = unzip encoded
+      fds = generateFdList restArgs restNames
+      selfTy = conT (mkName uName)
+      resultTy = [t|W (Object $(varT iName))|]
+      allArgTys =
+        [t|Object $selfTy|]
+          : (generateArgType <$> restArgs)
+          ++ [ [t|Word32|] -- version, since it isn't known statically for this new_id
+             , [t|Handlers $(varT iName)|] -- the caller's handlers, which pin down `i`
+             ]
+      arrowTy = foldr (\a r -> [t|$a -> $r|]) resultTy allArgTys
+  fullTy <- forallT [plainTV iName] (cxt [[t|InterfaceType $(varT iName)|]]) arrowTy
+  sig <- sigD rName (pure fullTy)
+
+  let pats = varP selfName : (varP <$> restNames) ++ [varP versionName, varP handlersName]
+      proxyExp = sigE (conE 'Proxy) [t|Proxy $(varT iName)|]
+      newIdValueExp =
+        [|ValueNewIdUntyped (ifaceNameT $proxyExp) $(varE versionName) $(varE newIdName)|]
+      allExps = insertAt newIdPos newIdValueExp restExps
+      msgExp =
+        [|Message (unObject $(varE selfName)) (Opcode opcode) $(listE allExps) $fds|]
+      bodyStmts =
+        [ bindS (varP newIdName) [|allocateNewId|]
+        , noBindS [|registerObject $(varE newIdName) (mkEntry $(varE handlersName))|]
+        , noBindS [|sendMessage (encodeMessage $msgExp)|]
+        , noBindS [|pure (Object $(varE newIdName))|]
+        ]
+  fun <- funD rName [clause pats (normalB (doE bodyStmts)) []]
   pure [sig, fun]
 
-generateEncoder :: Int -> Maybe Int -> [Argument] -> Q Clause
-generateEncoder opcode position args = do
-  argTypes <- sequence $ generateEncodePattern <$> args
-  let obVar = varP (mkName "ob")
-      (exps, pats) = unzip argTypes
-      insert i e xs = let (before, after) = splitAt i xs in before ++ (e : after)
-      (res, resBody) = case position of
-        Nothing -> ([|()|], exps)
-        Just i -> ([|(Object $ ObjectId 1)|], insert i [|ValueNewId (ObjectId 1)|] exps)
-      p = obVar : (varP <$> pats)
-      body =
-        normalB
-          [|
-            do
-              let m = Message (unObject ob) (Opcode opcode) $(listE resBody) []
-                  bs = encodeMessage m
-              sendMessage bs
-              pure $res
-            |]
-  clause p body []
+generateFdList :: [Argument] -> [TH.Name] -> Q Exp
+generateFdList exps names = do
+  let isFd (Argument{argType = TypeFileDescriptor}, _) = True
+      isFd _ = False
+      fds = varE . snd <$> filter isFd (zip exps names)
+  listE fds
 
--- createSurface :: WlCompositor -> WlSurfaceHandlers -> Wire WlSurface
--- createSurface (WlCompositor self) handlers = do
---   newId <- allocateNewId
---   registerObject newId (mkWlSurfaceEntry handlers)
---   sendMessage (encodeRequest self 0 [ArgNewId newId])
---   pure (WlSurface newId)
-
-generateIfaceEvents :: Interface -> Q [Dec]
-generateIfaceEvents Interface{ifaceName = n, ifaceEvents = events} = do
-  let uName = unpack . toCamelU $ n
-      eventName = mkName (uName ++ "Event")
-  (conList, funs) <- unzip <$> (sequence $ generateEvent uName <$> events)
-  dec <- dataD (cxt []) eventName [] Nothing conList [derivClause Nothing [conT ''Show, conT ''Typeable]]
-  let clauses = zipWith (\i f -> f i) [0 ..] funs
-      fallBackClause = clause [wildP, wildP] (normalB $ (appE $ conE 'Left) $ conE 'ValueToEventFailure) []
-      decoderName = mkName ("decode" ++ uName ++ "Event")
-  decoders <- funD decoderName (clauses ++ [fallBackClause])
-  decoderSig <- sigD decoderName [t|Opcode -> [Value] -> Either DecodeError SomeEvent|]
-  pure [dec, decoderSig, decoders]
-
-generateEventDecoder :: TH.Name -> ([Q Pat], [TH.Name]) -> Integer -> Q Clause
-generateEventDecoder eName (pats, exps) i = do
-  let opcode = [p|Opcode $(litP (integerL i))|]
-      p = listP pats
-      e = foldl' appE (conE eName) (varE <$> exps)
-  cl <- clause [opcode, p] (normalB [|Right (SomeEvent $e)|]) []
-  pure cl
-
-generateEvent :: String -> Event -> Q (Q Con, Integer -> Q Clause)
-generateEvent uName Event{eventName = n, eventArguments = args} = do
-  let eName = mkName . (uName ++) . unpack . toCamelU $ n
-      argTypes = generateArgType <$> args
-      argBangTypes = bangType (bang noSourceUnpackedness noSourceStrictness) <$> argTypes
-  decodePats <- sequence $ generateDecodePattern <$> args
-  let funs = generateEventDecoder eName $ unzip decodePats
-  pure (normalC eName argBangTypes, funs)
+--------------------------------------------------------------------------------
+-- Enums
+--------------------------------------------------------------------------------
 
 generateIfaceEnums :: Interface -> Q [Dec]
 generateIfaceEnums Interface{ifaceName = n, ifaceEnums = enums} = do
@@ -177,7 +430,7 @@ generateEncodePattern Argument{argType = t} = do
         TypeFixed -> [|ValueFixed $x|]
         TypeString False -> [|ValueString (Just $x)|]
         TypeString True -> [|ValueString $x|]
-        TypeFileDescriptor -> [|ValueFd (-1)|]
+        TypeFileDescriptor -> [|ValueFd $x|]
         TypeArray -> [|ValueArray $x|]
         TypeObject _ _ -> [|ValueObject $x|]
         TypeNewId _ -> [|ValueNewId $x|]
@@ -220,3 +473,9 @@ flattenQ = fmap concat . sequence
 
 notWrittenYetExp :: Q Exp
 notWrittenYetExp = [|error "not written yet"|]
+
+buildArrow :: [Q Type] -> Q Type -> Q Type
+buildArrow argTys result = foldr (\a r -> [t|$a -> $r|]) result argTys
+
+insertAt :: Int -> a -> [a] -> [a]
+insertAt n e xs = let (before, after) = splitAt n xs in before ++ (e : after)

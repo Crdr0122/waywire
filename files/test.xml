@@ -1,6 +1,9 @@
 <?xml version="1.0"?>
 <protocol name="test">
   <interface name="wl_callback" version="1">
+    <request name="register">
+      <arg name="testing" type="new_id"/>
+    </request>
   </interface>
   <interface name="wl_display" version="1">
     <request name="sync">
@@ -9,6 +12,7 @@
       <arg name="files" type="fd"/>
     </request>
     <event name="appeared">
+      <arg name="callback" type="new_id" interface="wl_callback"/>
       <arg name="appear_timing" type="uint"/>
     </event>
     <event name="error">
