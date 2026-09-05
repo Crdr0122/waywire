@@ -50,7 +50,8 @@ library
     Wayland.Protocol
     Wayland.Protocol.Parser
     Wayland.Types
-    Wayland.Wire
+    Wayland.Dispatch
+    Wayland.Generated
 
   other-modules:
     Wayland.TH

@@ -8,7 +8,7 @@ import Data.ByteString (ByteString)
 import Data.ByteString.Lazy qualified as BL
 import Data.Char as C
 import Data.Int (Int32)
-import Data.List (findIndex, findIndices)
+import Data.List (findIndex)
 import Data.List qualified as L
 import Data.Proxy
 import Data.Text (Text, cons, splitOn, uncons, unpack)
@@ -26,13 +26,11 @@ import Wayland.Protocol.Parser
 import Wayland.Types
 
 -- TODO Enum Args
--- TODO File Descriptors
---
 
-testProtocol :: Q [Dec]
-testProtocol = do
-  addDependentFile "files/test.xml"
-  fileContent <- runIO $ Text.XML.readFile def "files/test.xml"
+testProtocol :: FilePath -> Q [Dec]
+testProtocol fp = do
+  addDependentFile fp
+  fileContent <- runIO $ Text.XML.readFile def fp
   case parseProtocol $ fromDocument fileContent of
     Right a -> generateProtocol a
     Left _ -> pure []
@@ -67,14 +65,14 @@ generateIfaceType Interface{ifaceName = n} = do
 >   , onWlSurfaceLeave :: Object WlOutput -> W ()
 >   }
 >
-> dispatchWlSurface :: WlSurfaceHandlers -> Opcode -> ByteString -> Either DecodeError (W ())
-> dispatchWlSurface handlers (Opcode 0) bs = do
->   values <- decodeValues [ValueTypeObject] (BL.fromStrict bs)
+> dispatchWlSurface :: WlSurfaceHandlers -> Opcode -> ByteString -> [Fd] -> Either DecodeError (W (),[Fd])
+> dispatchWlSurface handlers (Opcode 0) bs fds = do
+>   (values, leftoverFds) <- decodeValues [ValueTypeObject] fds (BL.fromStrict bs)
 >   case values of
->     [ValueObject x] -> Right (onWlSurfaceEnter handlers (Object x))
+>     [ValueObject x] -> Right (onWlSurfaceEnter handlers (Object x), leftoverFds)
 >     _ -> Left ValueToEventFailure
 > ...
-> dispatchWlSurface _ (Opcode o) _ = Left (UnknownEventOpcode o)
+> dispatchWlSurface _ (Opcode o) _ _ = Left (UnknownEventOpcode o)
 >
 > mkWlSurfaceEntry :: WlSurfaceHandlers -> ObjectEntry
 > mkWlSurfaceEntry = ObjectEntry . dispatchWlSurface
@@ -100,7 +98,7 @@ generateIfaceEvents Interface{ifaceName = n, ifaceEvents = events} = do
 
   let clauses = zipWith (generateEventClause uName) [0 ..] events
       fallback = generateFallbackClause
-  dispatchSig <- sigD dispatchName [t|$(conT handlersName) -> Opcode -> ByteString -> Either DecodeError (W ())|]
+  dispatchSig <- sigD dispatchName [t|$(conT handlersName) -> Opcode -> ByteString -> [Fd] -> Either DecodeError (W (), [Fd])|]
   dispatchFun <- funD dispatchName (clauses ++ [fallback])
 
   mkEntrySig <- sigD mkEntryName [t|$(conT handlersName) -> ObjectEntry|]
@@ -145,36 +143,40 @@ findNewIdArg args = case [(t, a) | a@Argument{argType = TypeNewId (Just t)} <- a
 generateEventClause :: String -> Integer -> Event -> Q Clause
 generateEventClause uName i Event{eventName = n, eventArguments = args} = do
   handlersName <- newName "handlers"
+  fdsName <- newName "fds"
   bsName <- newName "bs"
   valuesName <- newName "values"
+  leftoverFdsName <- newName "leftoverFds"
   decodePats <- sequence $ generateDecodePattern <$> args
   let (valuePats, varNames) = unzip decodePats
       fieldName = mkName ("on" ++ uName ++ (unpack . toCamelU $ n))
       valueTypesExp = listE (generateValueTypeExp . argType <$> args)
-      bodyExp = generateEventBody fieldName args varNames handlersName
-  let matchOk = TH.match (listP valuePats) (normalB bodyExp) []
+      bodyExp = generateEventBody fieldName args varNames handlersName leftoverFdsName
+      matchOk = TH.match (listP valuePats) (normalB bodyExp) []
       matchFallback = TH.match wildP (normalB [|Left ValueToEventFailure|]) []
-      decodeStmt = bindS (varP valuesName) [|decodeValues $valueTypesExp (BL.fromStrict $(varE bsName))|]
+      decodeStmt = bindS (tupP [varP valuesName, varP leftoverFdsName]) [|decodeValues $valueTypesExp $(varE fdsName) (BL.fromStrict $(varE bsName))|]
       caseStmt = noBindS (caseE (varE valuesName) [matchOk, matchFallback])
   clause
-    [varP handlersName, conP 'Opcode [litP (integerL i)], varP bsName]
+    [varP handlersName, conP 'Opcode [litP (integerL i)], varP bsName, varP fdsName]
     (normalB (doE [decodeStmt, caseStmt]))
     []
 
-{- | Builds the @Right (onXEvent handlers arg1 arg2 ...)@ or, for a
+{- | Builds the @Right (onXEvent handlers arg1 arg2 ..., leftoverFds)@ or, for a
 spawning event, the @Right (do { h <- onXEvent handlers (Object newId)
-...; registerObject newId (mkEntry h) })@ body. Decoded object
+...; registerObject newId (mkEntry h) }, leftoverFds)@ body. Decoded object
 arguments come back as raw 'ObjectId's from 'decodeValues', so any
 argument whose handler-field type is @Object iface@ gets wrapped
-here to match.
+here to match. leftoverFdsName' is whatever 'decodeValues' didn't
+need for this message's own fd arguments -- it's just threaded
+through untouched, for the next message to consume.
 -}
-generateEventBody :: TH.Name -> [Argument] -> [TH.Name] -> TH.Name -> Q Exp
-generateEventBody fieldName args varNames handlersName =
+generateEventBody :: TH.Name -> [Argument] -> [TH.Name] -> TH.Name -> TH.Name -> Q Exp
+generateEventBody fieldName args varNames handlersName leftoverFdsName =
   case newIdIndex of
     Nothing ->
       let argExps = zipWith wrapArgExp args varNames
           applyHandler = foldl' appE (appE (varE fieldName) (varE handlersName)) argExps
-       in [|Right $applyHandler|]
+       in [|Right ($applyHandler, $(varE leftoverFdsName))|]
     Just idx ->
       let newIdVar = varNames !! idx
           otherArgs = [a | (j, a) <- zip [0 :: Int ..] args, j /= idx]
@@ -182,9 +184,12 @@ generateEventBody fieldName args varNames handlersName =
           argExps = [|Object $(varE newIdVar)|] : zipWith wrapArgExp otherArgs otherVars
           applyHandler = foldl' appE (appE (varE fieldName) (varE handlersName)) argExps
        in [|
-            Right $ do
-              h <- $applyHandler
-              registerObject $(varE newIdVar) (mkEntry h)
+            Right
+              ( do
+                  h <- $applyHandler
+                  registerObject $(varE newIdVar) (mkEntry h)
+              , $(varE leftoverFdsName)
+              )
             |]
  where
   newIdIndex = case [i | (i, a) <- zip [0 :: Int ..] args, isSpawning a] of
@@ -199,7 +204,11 @@ ValueObject and ValueNewId; wrap it in 'Object' wherever the
 handler-field type (built by 'generateArgType') expects that.
 -}
 wrapArgExp :: Argument -> TH.Name -> Q Exp
-wrapArgExp Argument{argType = TypeObject _ _} v = [|Object $(varE v)|]
+wrapArgExp Argument{argType = TypeObject (Just _) False} v = [|Object $(varE v)|]
+wrapArgExp Argument{argType = TypeObject (Just _) True} v =
+  [|if $(varE v) == ObjectId 0 then Nothing else Just (Object $(varE v))|]
+wrapArgExp Argument{argType = TypeObject Nothing True} v =
+  [|if $(varE v) == ObjectId 0 then Nothing else Just $(varE v)|]
 wrapArgExp _ v = varE v
 
 -- Fallback clause
@@ -207,7 +216,7 @@ generateFallbackClause :: Q Clause
 generateFallbackClause = do
   oName <- newName "o"
   clause
-    [wildP, conP 'Opcode [varP oName], wildP]
+    [wildP, conP 'Opcode [varP oName], wildP, wildP]
     (normalB [|Left (UnknownEventOpcode $(varE oName))|])
     []
 
@@ -432,7 +441,9 @@ generateEncodePattern Argument{argType = t} = do
         TypeString True -> [|ValueString $x|]
         TypeFileDescriptor -> [|ValueFd $x|]
         TypeArray -> [|ValueArray $x|]
-        TypeObject _ _ -> [|ValueObject $x|]
+        TypeObject (Just _) False -> [|ValueObject (unObject $x)|]
+        TypeObject (Just _) True -> [|ValueObject (maybe (ObjectId 0) unObject $x)|]
+        TypeObject Nothing _ -> error "Request objects need a interface name"
         TypeNewId _ -> [|ValueNewId $x|]
   pure (r, nameX)
 
@@ -445,9 +456,11 @@ generateArgType Argument{argType = t} = case t of
   TypeString True -> [t|Maybe Text|]
   TypeFileDescriptor -> [t|Fd|]
   TypeArray -> [t|ByteString|]
-  TypeObject iface False -> [t|Object $(uName iface)|]
-  TypeObject iface True -> [t|Maybe (Object $(uName iface))|]
-  TypeNewId Nothing -> [t|NewObject|]
+  TypeObject (Just iface) False -> [t|Object $(uName iface)|]
+  TypeObject (Just iface) True -> [t|Maybe (Object $(uName iface))|]
+  TypeObject Nothing False -> [t|ObjectId|]
+  TypeObject Nothing True -> [t|Maybe ObjectId|]
+  TypeNewId Nothing -> error "Events should not have this, requests should have had this striped out"
   TypeNewId (Just iface) -> [t|Object $(uName iface)|]
  where
   uName = conT . mkName . unpack . toCamelU

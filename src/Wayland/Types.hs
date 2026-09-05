@@ -10,17 +10,16 @@ import Data.ByteString (ByteString)
 import Data.ByteString.Lazy qualified as BL
 import Data.Int
 import Data.Kind (Type)
-import Data.Map (Map, insert)
+import Data.Map (Map, empty, insert)
 import Data.Proxy (Proxy)
 import Data.Text (Text)
 import Data.Word
 import Network.Socket
-import Network.Socket.ByteString.Lazy (sendAll)
+import Network.Socket.ByteString.Lazy (sendWithFds)
+import System.Environment (lookupEnv)
 import System.Posix.Types (Fd)
 
 type Fixed = Int32
-
-data NewObject -- TODO Placeholder for new_id
 
 newtype ObjectId = ObjectId Word32 deriving (Eq, Ord, Show)
 newtype Opcode = Opcode Word16 deriving (Eq, Ord, Show)
@@ -54,14 +53,15 @@ data ValueType
 
 data DecodeError
   = NotEnoughBytes
+  | NotEnoughFds
   | InvalidMessageSize Word16
-  | MessageTruncated
   | DecodeHeaderFailed String
   | DecodeArgFailed String
   | InvalidString
   | UnknownEventOpcode Word16
   | ValueToEventFailure
   | ExtraBytes
+  | UnexpectedFdArg
   deriving (Eq, Show)
 
 data Message = Message
@@ -91,10 +91,33 @@ data Env = Env
   , envSocket :: MVar Socket
   }
 
+{- | Takes the connection's current fd queue and, on success, hands back
+whatever's left of it after this message took what it needed --
+see 'Wayland.Decode.decodeValues'. A 'Left NotEnoughFds' (or
+'NotEnoughBytes', which won't happen here since the caller already
+confirmed a full message is available) means "try again once more
+data has arrived," not "fatal."
+-}
 newtype ObjectEntry = ObjectEntry
-  {dispatchEvent :: Opcode -> ByteString -> Either DecodeError (W ())}
+  {dispatchEvent :: Opcode -> ByteString -> [Fd] -> Either DecodeError (W (), [Fd])}
 
 type W a = ReaderT Env IO a
+
+mkNewEnv :: IO Env
+mkNewEnv = do
+  reg <- newMVar empty
+  i <- newMVar 2
+  display <- lookupEnv "WAYLAND_DISPLAY"
+  runtime <- lookupEnv "XDG_RUNTIME_DIR"
+  p <- case (display, runtime) of
+    (Just d@('/' : _), _) -> pure d
+    (Just d, Just x) -> pure (x ++ "/" ++ d)
+    (Nothing, Just x) -> pure (x ++ "/wayland-0")
+    _ -> error "XDG_RUNTIME_DIR not set"
+  soc <- socket AF_UNIX Stream defaultProtocol
+  connect soc (SockAddrUnix p)
+  socMvar <- newMVar soc
+  pure $ Env reg i socMvar
 
 allocateNewId :: W ObjectId
 allocateNewId = do
@@ -104,9 +127,7 @@ allocateNewId = do
 sendMessage :: (BL.ByteString, [Fd]) -> W ()
 sendMessage (msg, fds) = do
   s <- asks envSocket
-  liftIO $ withMVar s $ \soc -> do
-    soc `sendAll` msg
-    mapM_ (sendFd soc . fromIntegral) fds
+  liftIO $ withMVar s $ \soc -> sendWithFds soc msg fds
 
 registerObject :: ObjectId -> ObjectEntry -> W ()
 registerObject oid entry = do

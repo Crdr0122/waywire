@@ -111,8 +111,8 @@ parseArgType "fixed" _ _ = Right TypeFixed
 parseArgType "string" _ (Right null') = Right $ TypeString null'
 parseArgType "array" _ _ = Right TypeArray
 parseArgType "fd" _ _ = Right TypeFileDescriptor
-parseArgType "object" (Just iface) (Right null') = Right $ TypeObject iface null'
-parseArgType "object" Nothing _ = Left $ ObjectMissingInterface
+parseArgType "object" (Just iface) (Right null') = Right $ TypeObject (Just iface) null'
+parseArgType "object" Nothing (Right null') = Right $ TypeObject Nothing null'
 parseArgType "new_id" iface _ = Right $ TypeNewId iface
 parseArgType unknown _ _ = Left $ UnknownArgumentType unknown
 

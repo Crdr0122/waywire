@@ -7,33 +7,10 @@ import Data.Binary.Get
 import Data.Bits (shiftR, (.&.))
 import Data.ByteString as BS
 import Data.ByteString.Lazy qualified as BL
-import Data.List qualified as L
 import Data.Text.Encoding as TE
+import System.Posix.Types (Fd)
 import Wayland.Protocol
 import Wayland.Types
-
-data DecodedEvent = DecodedEvent
-  { decodedEvent :: Event
-  , decodedValues :: [Value]
-  }
-
-decodeInterfaceEvent :: Interface -> Opcode -> BL.ByteString -> Either DecodeError DecodedEvent
-decodeInterfaceEvent iface opcode@(Opcode o) payload = do
-  event <- maybe (Left $ UnknownEventOpcode o) Right $ eventAtOpcode iface opcode
-  decodeEventFromBS event payload
-
-decodeEventFromBS :: Event -> BL.ByteString -> Either DecodeError DecodedEvent
-decodeEventFromBS e@Event{eventArguments = args} bs = do
-  values <- decodeValues types bs
-  pure $ DecodedEvent e values
- where
-  types = argTypeToValueType . argType <$> args
-
-eventAtOpcode :: Interface -> Opcode -> Maybe Event
-eventAtOpcode Interface{ifaceEvents = e} (Opcode o) = e L.!? (fromIntegral o)
-
-requestAtOpcode :: Interface -> Opcode -> Maybe Request
-requestAtOpcode Interface{ifaceRequests = r} (Opcode o) = r L.!? (fromIntegral o)
 
 argTypeToValueType :: ArgType -> ValueType
 argTypeToValueType TypeInt = ValueTypeInt
@@ -45,30 +22,45 @@ argTypeToValueType (TypeObject{}) = ValueTypeObject
 argTypeToValueType (TypeNewId{}) = ValueTypeNewId
 argTypeToValueType TypeFileDescriptor = ValueTypeFd
 
-decodeMessageHeader :: BL.ByteString -> Either DecodeError (ObjectId, Opcode, BL.ByteString)
+decodeMessageHeader :: BL.ByteString -> Either DecodeError (ObjectId, Opcode, BL.ByteString, BL.ByteString)
 decodeMessageHeader bs
   | l < 8 = Left NotEnoughBytes
   | otherwise = case runGetOrFail getHeader bs of
       Left (_, _, str) -> Left $ DecodeHeaderFailed str
       Right (_, _, (obId, sizeOpcode))
         | size < 8 -> Left $ InvalidMessageSize size
-        | (fromIntegral size) > l -> Left MessageTruncated
-        | otherwise -> Right (obId, code, BL.take (fromIntegral size - 8) (BL.drop 8 bs))
+        | (fromIntegral size) > l -> Left NotEnoughBytes
+        | otherwise -> Right (obId, code, body, rest)
        where
         size :: Word16
         size = fromIntegral $ sizeOpcode `shiftR` 16
         code :: Opcode
         code = Opcode $ fromIntegral $ sizeOpcode .&. 0xFFFF
+        body = BL.take (fromIntegral size - 8) (BL.drop 8 bs)
+        rest = BL.drop (fromIntegral size) bs
  where
   l = BL.length bs
 
-decodeValues :: [ValueType] -> BL.ByteString -> Either DecodeError [Value]
-decodeValues (t : ts) bs = do
+{- | Decodes a message's arguments AND threads the connection's fd
+queue through: an 'fd'-typed argument consumes zero *bytes* but one
+fd off the front of the supplied list, and the leftover fds (not
+needed by this message) are handed back for the next one. Running
+out of fds is reported the same way as running out of bytes
+('NotEnoughFds') -- it means "the sendmsg() call carrying them
+hasn't arrived yet," not "the message is malformed."
+-}
+decodeValues :: [ValueType] -> [Fd] -> BL.ByteString -> Either DecodeError ([Value], [Fd])
+decodeValues (ValueTypeFd : ts) fds bs = case fds of
+  [] -> Left NotEnoughFds
+  (fd : restFds) -> do
+    (values, leftoverFds) <- decodeValues ts restFds bs
+    pure (ValueFd fd : values, leftoverFds)
+decodeValues (t : ts) fds bs = do
   (value, remains) <- decodeValue t bs
-  values <- decodeValues ts remains
-  pure (value : values)
-decodeValues [] bs
-  | BL.null bs = Right []
+  (values, leftoverFds) <- decodeValues ts fds remains
+  pure (value : values, leftoverFds)
+decodeValues [] fds bs
+  | BL.null bs = Right ([], fds)
   | otherwise = Left ExtraBytes
 
 decodeValue :: ValueType -> BL.ByteString -> Either DecodeError (Value, BL.ByteString)
@@ -87,7 +79,7 @@ decodeValue ValueTypeObject bs = do
 decodeValue ValueTypeNewId bs = do
   (i, remains) <- runDecoder getWord32le bs
   pure (ValueNewId (ObjectId i), remains)
-decodeValue ValueTypeFd bs = pure (ValueFd (-1), bs)
+decodeValue ValueTypeFd _ = Left UnexpectedFdArg
 decodeValue ValueTypeArray bs = case runGetOrFail getWord32le bs of
   Left (_, _, str) -> Left $ DecodeArgFailed str
   Right (remainArray, _, i) -> case runGetOrFail (getByteString (pad4 $ fromIntegral i)) remainArray of

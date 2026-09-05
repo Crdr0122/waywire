@@ -58,7 +58,7 @@ data ArgType
   | TypeArray
   | TypeFileDescriptor
   | TypeObject
-      { objectInterface :: Text
+      { objectInterface :: Maybe Text
       , objectNullable :: Bool
       }
   | TypeNewId {newIdInterface :: Maybe Text}
