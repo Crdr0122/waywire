@@ -4,14 +4,13 @@
 pkgs.mkShell {
   nativeBuildInputs = with pkgs; [
     pkg-config
+    wayland-scanner
     (haskellPackages.ghcWithPackages (p: [
+      p.cabal-install
       p.bimap
       p.filepath
       p.directory
       p.aeson
-      p.cabal-install
-      p.xml-conduit
-      p.hxt
     ]))
   ];
   buildInputs = with pkgs; [

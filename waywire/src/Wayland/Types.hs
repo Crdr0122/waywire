@@ -17,7 +17,6 @@ import Data.Word
 import Network.Socket
 import Network.Socket.ByteString.Lazy (sendWithFds)
 import System.Environment (lookupEnv)
-import System.IO
 import System.Posix.Types (Fd)
 
 type Fixed = Int32
