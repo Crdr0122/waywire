@@ -17,6 +17,7 @@ import Data.Word
 import Network.Socket
 import Network.Socket.ByteString.Lazy (sendWithFds)
 import System.Environment (lookupEnv)
+import System.IO
 import System.Posix.Types (Fd)
 
 type Fixed = Int32
@@ -83,12 +84,13 @@ class InterfaceType a where
   type Handlers a = (r :: Type) | r -> a
   ifaceNameT :: Proxy a -> Text
   ifaceVersionT :: Proxy a -> Int
-  mkEntry :: Handlers a -> ObjectEntry
+  mkEntry :: Object a -> Handlers a -> ObjectEntry
 
 data Env = Env
   { envRegistry :: MVar (Map ObjectId ObjectEntry)
   , envIdAlloc :: MVar Word32
-  , envSocket :: MVar Socket
+  , envSocket :: Socket
+  , envSocketLock :: MVar ()
   }
 
 {- | Takes the connection's current fd queue and, on success, hands back
@@ -106,7 +108,7 @@ type W a = ReaderT Env IO a
 mkNewEnv :: IO Env
 mkNewEnv = do
   reg <- newMVar empty
-  i <- newMVar 2
+  i <- newMVar 1
   display <- lookupEnv "WAYLAND_DISPLAY"
   runtime <- lookupEnv "XDG_RUNTIME_DIR"
   p <- case (display, runtime) of
@@ -116,8 +118,8 @@ mkNewEnv = do
     _ -> error "XDG_RUNTIME_DIR not set"
   soc <- socket AF_UNIX Stream defaultProtocol
   connect soc (SockAddrUnix p)
-  socMvar <- newMVar soc
-  pure $ Env reg i socMvar
+  lock <- newMVar ()
+  pure $ Env reg i soc lock
 
 allocateNewId :: W ObjectId
 allocateNewId = do
@@ -127,7 +129,8 @@ allocateNewId = do
 sendMessage :: (BL.ByteString, [Fd]) -> W ()
 sendMessage (msg, fds) = do
   s <- asks envSocket
-  liftIO $ withMVar s $ \soc -> sendWithFds soc msg fds
+  lock <- asks envSocketLock
+  liftIO $ withMVar lock $ \_ -> sendWithFds s msg fds
 
 registerObject :: ObjectId -> ObjectEntry -> W ()
 registerObject oid entry = do

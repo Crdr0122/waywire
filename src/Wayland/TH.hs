@@ -2,20 +2,24 @@
 {-# LANGUAGE TemplateHaskell #-}
 {-# LANGUAGE TypeFamilies #-}
 
-module Wayland.TH where
+module Wayland.TH (generateModules, generateModule) where
 
+import Control.Monad (filterM, forM)
+import Data.Bits ((.&.), (.|.))
 import Data.ByteString (ByteString)
 import Data.ByteString.Lazy qualified as BL
 import Data.Char as C
 import Data.Int (Int32)
 import Data.List (findIndex)
 import Data.List qualified as L
+import Data.Map qualified as M
+import Data.Maybe (catMaybes)
 import Data.Proxy
 import Data.Text (Text, cons, splitOn, uncons, unpack)
 import Data.Text qualified as T
 import Data.Word (Word32)
 import Language.Haskell.TH as TH
-import Language.Haskell.TH.Syntax (addDependentFile)
+import System.Directory
 import System.Posix.Types (Fd)
 import Text.XML
 import Text.XML.Cursor
@@ -25,21 +29,33 @@ import Wayland.Protocol
 import Wayland.Protocol.Parser
 import Wayland.Types
 
--- TODO Enum Args
+generateModules :: FilePath -> Q [Dec]
+generateModules fp = do
+  allFiles <- runIO $ listDirectory fp
+  files <- runIO $ filterM (\path -> doesFileExist (fp <> path)) allFiles
+  maybeProtocols <- sequence $ single <$> files
+  let (ets, protocols) = unzip $ catMaybes maybeProtocols
+      table = M.unions ets
+  concat <$> (forM protocols $ generateProtocol table)
+ where
+  single f = do
+    fileContent <- runIO $ Text.XML.readFile def f
+    case parseProtocol $ fromDocument fileContent of
+      Right a -> let et = buildEnumTable a in pure (Just (et, a))
+      Left _ -> pure Nothing
 
-testProtocol :: FilePath -> Q [Dec]
-testProtocol fp = do
-  addDependentFile fp
+generateModule :: FilePath -> Q [Dec]
+generateModule fp = do
   fileContent <- runIO $ Text.XML.readFile def fp
   case parseProtocol $ fromDocument fileContent of
-    Right a -> generateProtocol a
+    Right a -> let et = buildEnumTable a in generateProtocol et a
     Left _ -> pure []
 
-generateProtocol :: Protocol -> Q [Dec]
-generateProtocol Protocol{protoInterfaces = ifaces} = do
+generateProtocol :: EnumTable -> Protocol -> Q [Dec]
+generateProtocol et Protocol{protoInterfaces = ifaces} = do
   types <- flattenQ $ generateIfaceType <$> ifaces
-  events <- flattenQ $ generateIfaceEvents <$> ifaces
-  reqs <- flattenQ $ generateIfaceReqs <$> ifaces
+  events <- flattenQ $ generateIfaceEvents et <$> ifaces
+  reqs <- flattenQ $ generateIfaceReqs et <$> ifaces
   enums <- flattenQ $ generateIfaceEnums <$> ifaces
   instances <- flattenQ $ generateIfaceInstance <$> ifaces
   pure $ types ++ events ++ reqs ++ instances ++ enums
@@ -61,18 +77,18 @@ generateIfaceType Interface{ifaceName = n} = do
 {- | For a given interface, generates:
 
 > data WlSurfaceHandlers = WlSurfaceHandlers
->   { onWlSurfaceEnter :: Object WlOutput -> W ()
->   , onWlSurfaceLeave :: Object WlOutput -> W ()
+>   { onWlSurfaceEnter :: Object WlSurface -> Object WlOutput -> W ()
+>   , onWlSurfaceLeave :: Object WlSurface -> Object WlOutput -> W ()
 >   }
 >
-> dispatchWlSurface :: WlSurfaceHandlers -> Opcode -> ByteString -> [Fd] -> Either DecodeError (W (),[Fd])
-> dispatchWlSurface handlers (Opcode 0) bs fds = do
+> dispatchWlSurface :: Object WlSurface -> WlSurfaceHandlers -> Opcode -> ByteString -> [Fd] -> Either DecodeError (W (),[Fd])
+> dispatchWlSurface self handlers (Opcode 0) bs fds = do
 >   (values, leftoverFds) <- decodeValues [ValueTypeObject] fds (BL.fromStrict bs)
 >   case values of
->     [ValueObject x] -> Right (onWlSurfaceEnter handlers (Object x), leftoverFds)
+>     [ValueObject x] -> Right (onWlSurfaceEnter handlers self (Object x), leftoverFds)
 >     _ -> Left ValueToEventFailure
 > ...
-> dispatchWlSurface _ (Opcode o) _ _ = Left (UnknownEventOpcode o)
+> dispatchWlSurface _ _ (Opcode o) _ _ = Left (UnknownEventOpcode o)
 >
 > mkWlSurfaceEntry :: WlSurfaceHandlers -> ObjectEntry
 > mkWlSurfaceEntry = ObjectEntry . dispatchWlSurface
@@ -86,46 +102,50 @@ generated dispatch clause registers the child object for you:
 >   h <- onWlDataDeviceDataOffer handlers (Object newId) ...
 >   registerObject newId (mkEntry h)
 -}
-generateIfaceEvents :: Interface -> Q [Dec]
-generateIfaceEvents Interface{ifaceName = n, ifaceEvents = events} = do
+generateIfaceEvents :: EnumTable -> Interface -> Q [Dec]
+generateIfaceEvents et Interface{ifaceName = n, ifaceEvents = events} = do
   let uName = unpack . toCamelU $ n
+      ifaceTy = conT (mkName uName)
       handlersName = mkName (uName ++ "Handlers")
       dispatchName = mkName ("dispatch" ++ uName)
       mkEntryName = mkName ("mk" ++ uName ++ "Entry")
 
-  fields <- sequence $ generateHandlerField uName <$> events
-  handlersDec <- dataD (cxt []) handlersName [] Nothing [recC handlersName (pure <$> fields)] []
+      fields = generateHandlerField et n uName <$> events
+  handlersDec <- dataD (cxt []) handlersName [] Nothing [recC handlersName fields] []
+  selfName <- newName "self"
 
-  let clauses = zipWith (generateEventClause uName) [0 ..] events
+  let clauses = zipWith (generateEventClause et n uName selfName) [0 ..] events
       fallback = generateFallbackClause
-  dispatchSig <- sigD dispatchName [t|$(conT handlersName) -> Opcode -> ByteString -> [Fd] -> Either DecodeError (W (), [Fd])|]
+  dispatchSig <- sigD dispatchName [t|Object $ifaceTy -> $(conT handlersName) -> Opcode -> ByteString -> [Fd] -> Either DecodeError (W (), [Fd])|]
   dispatchFun <- funD dispatchName (clauses ++ [fallback])
 
-  mkEntrySig <- sigD mkEntryName [t|$(conT handlersName) -> ObjectEntry|]
-  mkEntryFun <- funD mkEntryName [clause [] (normalB [|ObjectEntry . $(varE dispatchName)|]) []]
+  mkEntrySig <- sigD mkEntryName [t|Object $ifaceTy -> $(conT handlersName) -> ObjectEntry|]
+  mkEntryFun <- funD mkEntryName [clause [varP selfName] (normalB [|ObjectEntry . $(varE dispatchName) $(varE selfName)|]) []]
 
   pure [handlersDec, dispatchSig, dispatchFun, mkEntrySig, mkEntryFun]
 
 -- | Build one record field for the handlers type. eg. onWlSurfaceEnter
-generateHandlerField :: String -> Event -> Q VarBangType
-generateHandlerField uName Event{eventName = n, eventArguments = args} = do
+generateHandlerField :: EnumTable -> Text -> String -> Event -> Q VarBangType
+generateHandlerField et selfIface uName Event{eventName = n, eventArguments = args} = do
   let fieldName = mkName ("on" ++ uName ++ (unpack . toCamelU $ n))
   varBangType
     fieldName
-    (bangType (bang noSourceUnpackedness noSourceStrictness) (generateHandlerFieldType args))
+    (bangType (bang noSourceUnpackedness noSourceStrictness) (generateHandlerFieldType et selfIface uName args))
 
 {- | Non-spawning event: @arg1 -> arg2 -> ... -> W ()@.
 Spawning event (one new_id arg with a known interface): the new
 object is passed first, and the result is @W (Handlers Child)@ so
 the dispatch clause knows what to register.
 -}
-generateHandlerFieldType :: [Argument] -> Q Type
-generateHandlerFieldType args = case findNewIdArg args of
-  Nothing -> buildArrow (generateArgType <$> args) [t|W ()|]
-  Just (childIfaceText, otherArgs) ->
-    let childTy = conT (mkName . unpack . toCamelU $ childIfaceText)
-        argTys = [t|Object $childTy|] : (generateArgType <$> otherArgs)
-     in buildArrow argTys [t|W (Handlers $childTy)|]
+generateHandlerFieldType :: EnumTable -> Text -> String -> [Argument] -> Q Type
+generateHandlerFieldType et selfIface uName args =
+  let selfTy = [t|Object $(conT (mkName uName))|]
+   in case findNewIdArg args of
+        Nothing -> buildArrow (selfTy : (generateArgType et selfIface <$> args)) [t|W ()|]
+        Just (childIfaceText, otherArgs) ->
+          let childTy = conT (mkName . unpack . toCamelU $ childIfaceText)
+              argTys = selfTy : [t|Object $childTy|] : (generateArgType et selfIface <$> otherArgs)
+           in buildArrow argTys [t|W (Handlers $childTy)|]
 
 {- | Finds the single new_id-with-known-interface argument, if any,
 and returns it along with the remaining arguments in their
@@ -140,8 +160,8 @@ findNewIdArg args = case [(t, a) | a@Argument{argType = TypeNewId (Just t)} <- a
   _ -> error "waywire: multiple new_id arguments in a single event is not supported"
 
 -- | One clause of 'dispatchWlSurface' for one event/opcode.
-generateEventClause :: String -> Integer -> Event -> Q Clause
-generateEventClause uName i Event{eventName = n, eventArguments = args} = do
+generateEventClause :: EnumTable -> Text -> String -> TH.Name -> Integer -> Event -> Q Clause
+generateEventClause et selfIface uName selfName i Event{eventName = n, eventArguments = args} = do
   handlersName <- newName "handlers"
   fdsName <- newName "fds"
   bsName <- newName "bs"
@@ -151,13 +171,13 @@ generateEventClause uName i Event{eventName = n, eventArguments = args} = do
   let (valuePats, varNames) = unzip decodePats
       fieldName = mkName ("on" ++ uName ++ (unpack . toCamelU $ n))
       valueTypesExp = listE (generateValueTypeExp . argType <$> args)
-      bodyExp = generateEventBody fieldName args varNames handlersName leftoverFdsName
+      bodyExp = generateEventBody et selfIface fieldName selfName args varNames handlersName leftoverFdsName
       matchOk = TH.match (listP valuePats) (normalB bodyExp) []
       matchFallback = TH.match wildP (normalB [|Left ValueToEventFailure|]) []
       decodeStmt = bindS (tupP [varP valuesName, varP leftoverFdsName]) [|decodeValues $valueTypesExp $(varE fdsName) (BL.fromStrict $(varE bsName))|]
       caseStmt = noBindS (caseE (varE valuesName) [matchOk, matchFallback])
   clause
-    [varP handlersName, conP 'Opcode [litP (integerL i)], varP bsName, varP fdsName]
+    [varP selfName, varP handlersName, conP 'Opcode [litP (integerL i)], varP bsName, varP fdsName]
     (normalB (doE [decodeStmt, caseStmt]))
     []
 
@@ -170,24 +190,24 @@ here to match. leftoverFdsName' is whatever 'decodeValues' didn't
 need for this message's own fd arguments -- it's just threaded
 through untouched, for the next message to consume.
 -}
-generateEventBody :: TH.Name -> [Argument] -> [TH.Name] -> TH.Name -> TH.Name -> Q Exp
-generateEventBody fieldName args varNames handlersName leftoverFdsName =
+generateEventBody :: EnumTable -> Text -> TH.Name -> TH.Name -> [Argument] -> [TH.Name] -> TH.Name -> TH.Name -> Q Exp
+generateEventBody et selfIface fieldName selfName args varNames handlersName leftoverFdsName =
   case newIdIndex of
     Nothing ->
-      let argExps = zipWith wrapArgExp args varNames
+      let argExps = varE selfName : zipWith (wrapArgExp et selfIface) args varNames
           applyHandler = foldl' appE (appE (varE fieldName) (varE handlersName)) argExps
        in [|Right ($applyHandler, $(varE leftoverFdsName))|]
     Just idx ->
       let newIdVar = varNames !! idx
           otherArgs = [a | (j, a) <- zip [0 :: Int ..] args, j /= idx]
           otherVars = [v | (j, v) <- zip [0 :: Int ..] varNames, j /= idx]
-          argExps = [|Object $(varE newIdVar)|] : zipWith wrapArgExp otherArgs otherVars
+          argExps = varE selfName : [|Object $(varE newIdVar)|] : zipWith (wrapArgExp et selfIface) otherArgs otherVars
           applyHandler = foldl' appE (appE (varE fieldName) (varE handlersName)) argExps
        in [|
             Right
               ( do
                   h <- $applyHandler
-                  registerObject $(varE newIdVar) (mkEntry h)
+                  registerObject $(varE newIdVar) (mkEntry (Object $(varE newIdVar)) h)
               , $(varE leftoverFdsName)
               )
             |]
@@ -203,20 +223,24 @@ generateEventBody fieldName args varNames handlersName leftoverFdsName =
 ValueObject and ValueNewId; wrap it in 'Object' wherever the
 handler-field type (built by 'generateArgType') expects that.
 -}
-wrapArgExp :: Argument -> TH.Name -> Q Exp
-wrapArgExp Argument{argType = TypeObject (Just _) False} v = [|Object $(varE v)|]
-wrapArgExp Argument{argType = TypeObject (Just _) True} v =
+wrapArgExp :: EnumTable -> Text -> Argument -> TH.Name -> Q Exp
+wrapArgExp enumTable selfIface Argument{argEnum = Just ref} v =
+  let (owner, e) = resolveEnumRef enumTable selfIface ref
+      value = varE (mkName ((if enumBitfield e then fromWordFlagFnName else fromWordFnName) owner e)) `appE` [|fromIntegral $(varE v)|]
+   in value
+wrapArgExp _ _ Argument{argType = TypeObject (Just _) False} v = [|Object $(varE v)|]
+wrapArgExp _ _ Argument{argType = TypeObject (Just _) True} v =
   [|if $(varE v) == ObjectId 0 then Nothing else Just (Object $(varE v))|]
-wrapArgExp Argument{argType = TypeObject Nothing True} v =
+wrapArgExp _ _ Argument{argType = TypeObject Nothing True} v =
   [|if $(varE v) == ObjectId 0 then Nothing else Just $(varE v)|]
-wrapArgExp _ v = varE v
+wrapArgExp _ _ _ v = varE v
 
 -- Fallback clause
 generateFallbackClause :: Q Clause
 generateFallbackClause = do
   oName <- newName "o"
   clause
-    [wildP, conP 'Opcode [varP oName], wildP, wildP]
+    [wildP, wildP, conP 'Opcode [varP oName], wildP, wildP]
     (normalB [|Left (UnknownEventOpcode $(varE oName))|])
     []
 
@@ -263,11 +287,11 @@ generateIfaceInstance Interface{ifaceName = n, ifaceVersion = v} = do
 -- Requests
 --------------------------------------------------------------------------------
 
-generateIfaceReqs :: Interface -> Q [Dec]
-generateIfaceReqs Interface{ifaceName = n, ifaceRequests = reqs} = do
+generateIfaceReqs :: EnumTable -> Interface -> Q [Dec]
+generateIfaceReqs et Interface{ifaceName = n, ifaceRequests = reqs} = do
   let uName = unpack . toCamelU $ n
       lName = transformFstStr C.toLower uName
-  flattenQ $ zipWith (generateReq uName lName) [0 ..] reqs
+  flattenQ $ zipWith (generateReq et n uName lName) [0 ..] reqs
 
 {- | Dispatches to one of three shapes depending on the request's
 new_id argument (if any):
@@ -277,59 +301,58 @@ new_id argument (if any):
   * new_id, no iface      -> bind-style: polymorphic in the caller-chosen
                              interface, takes an explicit version
 -}
-generateReq :: String -> String -> Int -> Request -> Q [Dec]
-generateReq uName lName opcode Request{reqName = n, reqArguments = args} = do
+generateReq :: EnumTable -> Text -> String -> String -> Int -> Request -> Q [Dec]
+generateReq et selfIface uName lName opcode Request{reqName = n, reqArguments = args} = do
   let rName = mkName (lName ++ (unpack . toCamelU $ n))
       (newIdArgs, restArgs) = L.partition isNewID args
       position = findIndex isNewID args
   case (position, newIdArgs) of
     (Nothing, _) -> do
-      sig <- sigD rName (generateSimpleReqType uName args)
-      fun <- funD rName [generateSimpleClause opcode args]
+      sig <- sigD rName (generateSimpleReqType et selfIface uName args)
+      fun <- funD rName [generateSimpleClause et selfIface opcode args]
       pure [sig, fun]
     (Just i, [Argument{argType = TypeNewId (Just childIfaceText)}]) -> do
-      sig <- sigD rName (generateSpawnReqType uName childIfaceText restArgs)
-      fun <- funD rName [generateSpawnClause opcode i childIfaceText restArgs]
+      sig <- sigD rName (generateSpawnReqType et selfIface uName childIfaceText restArgs)
+      fun <- funD rName [generateSpawnClause et selfIface opcode i childIfaceText restArgs]
       pure [sig, fun]
     (Just i, [Argument{argType = TypeNewId Nothing}]) ->
-      generateBindReq rName uName opcode i restArgs
-    -- pure []
+      generateBindReq et selfIface rName uName opcode i restArgs
     _ -> error "waywire: multiple new_id arguments in a single request is not supported"
 
-generateSimpleReqType :: String -> [Argument] -> Q Type
-generateSimpleReqType uName args = buildArrow ([t|Object $(conT (mkName uName))|] : (generateArgType <$> args)) [t|W ()|]
+generateSimpleReqType :: EnumTable -> Text -> String -> [Argument] -> Q Type
+generateSimpleReqType et selfIface uName args = buildArrow ([t|Object $(conT (mkName uName))|] : (generateArgType et selfIface <$> args)) [t|W ()|]
 
-generateSimpleClause :: Int -> [Argument] -> Q Clause
-generateSimpleClause opcode args = do
+generateSimpleClause :: EnumTable -> Text -> Int -> [Argument] -> Q Clause
+generateSimpleClause et selfIface opcode args = do
   selfName <- newName "self"
-  encoded <- sequence (generateEncodePattern <$> args)
+  encoded <- sequence (generateEncodePattern et selfIface <$> args)
   let (valueExps, argNames) = unzip encoded
       fds = generateFdList args argNames
       pats = varP selfName : (varP <$> argNames)
       msgExp = [|Message (unObject $(varE selfName)) (Opcode opcode) $(listE valueExps) $fds|]
   clause pats (normalB [|sendMessage (encodeMessage $msgExp)|]) []
 
-generateSpawnReqType :: String -> Text -> [Argument] -> Q Type
-generateSpawnReqType uName childIfaceText restArgs =
+generateSpawnReqType :: EnumTable -> Text -> String -> Text -> [Argument] -> Q Type
+generateSpawnReqType et selfIface uName childIfaceText restArgs =
   let childTy = conT (mkName . unpack . toCamelU $ childIfaceText)
       selfTy = conT (mkName uName)
       handlersTy = [t|Handlers $childTy|]
    in buildArrow
-        ([t|Object $selfTy|] : (generateArgType <$> restArgs) ++ [handlersTy])
+        ([t|Object $selfTy|] : (generateArgType et selfIface <$> restArgs) ++ [handlersTy])
         [t|W (Object $childTy)|]
 
 {- | createSurface self ...otherArgs... handlers = do
     newId <- allocateNewId
-    registerObject newId (mkEntry handlers)
+    registerObject newId (mkEntry object handlers)
     sendMessage (encodeMessage (Message (unObject self) (Opcode opcode) [..args with ValueNewId newId spliced back in..] []))
     pure (Object newId)
 -}
-generateSpawnClause :: Int -> Int -> Text -> [Argument] -> Q Clause
-generateSpawnClause opcode newIdPos _childIfaceText restArgs = do
+generateSpawnClause :: EnumTable -> Text -> Int -> Int -> Text -> [Argument] -> Q Clause
+generateSpawnClause et selfIface opcode newIdPos _childIfaceText restArgs = do
   selfName <- newName "self"
   handlersName <- newName "handlers"
   newIdName <- newName "newId"
-  encoded <- sequence (generateEncodePattern <$> restArgs)
+  encoded <- sequence (generateEncodePattern et selfIface <$> restArgs)
   let (restExps, restNames) = unzip encoded
       fds = generateFdList restArgs restNames
       pats = varP selfName : (varP <$> restNames) ++ [varP handlersName]
@@ -337,7 +360,7 @@ generateSpawnClause opcode newIdPos _childIfaceText restArgs = do
       allExps = insertAt newIdPos newIdValueExp restExps
       bodyStmts =
         [ bindS (varP newIdName) [|allocateNewId|]
-        , noBindS [|registerObject $(varE newIdName) (mkEntry $(varE handlersName))|]
+        , noBindS [|registerObject $(varE newIdName) (mkEntry (Object $(varE newIdName)) $(varE handlersName))|]
         , noBindS [|sendMessage (encodeMessage (Message (unObject $(varE selfName)) (Opcode opcode) $(listE allExps) $fds))|]
         , noBindS [|pure (Object $(varE newIdName))|]
         ]
@@ -352,21 +375,21 @@ bindWlRegistryBind self name version handlers = do
     [ValueUInt name, ValueNewIdUntyped (ifaceNameT (Proxy :: Proxy i)) version newId] []))
   pure (Object newId)
 -}
-generateBindReq :: TH.Name -> String -> Int -> Int -> [Argument] -> Q [Dec]
-generateBindReq rName uName opcode newIdPos restArgs = do
+generateBindReq :: EnumTable -> Text -> TH.Name -> String -> Int -> Int -> [Argument] -> Q [Dec]
+generateBindReq et selfIface rName uName opcode newIdPos restArgs = do
   iName <- newName "i"
   selfName <- newName "self"
   versionName <- newName "version"
   newIdName <- newName "newId"
   handlersName <- newName "handlers"
-  encoded <- sequence (generateEncodePattern <$> restArgs)
+  encoded <- sequence (generateEncodePattern et selfIface <$> restArgs)
   let (restExps, restNames) = unzip encoded
       fds = generateFdList restArgs restNames
       selfTy = conT (mkName uName)
       resultTy = [t|W (Object $(varT iName))|]
       allArgTys =
         [t|Object $selfTy|]
-          : (generateArgType <$> restArgs)
+          : (generateArgType et selfIface <$> restArgs)
           ++ [ [t|Word32|] -- version, since it isn't known statically for this new_id
              , [t|Handlers $(varT iName)|] -- the caller's handlers, which pin down `i`
              ]
@@ -376,14 +399,12 @@ generateBindReq rName uName opcode newIdPos restArgs = do
 
   let pats = varP selfName : (varP <$> restNames) ++ [varP versionName, varP handlersName]
       proxyExp = sigE (conE 'Proxy) [t|Proxy $(varT iName)|]
-      newIdValueExp =
-        [|ValueNewIdUntyped (ifaceNameT $proxyExp) $(varE versionName) $(varE newIdName)|]
+      newIdValueExp = [|ValueNewIdUntyped (ifaceNameT $proxyExp) $(varE versionName) $(varE newIdName)|]
       allExps = insertAt newIdPos newIdValueExp restExps
-      msgExp =
-        [|Message (unObject $(varE selfName)) (Opcode opcode) $(listE allExps) $fds|]
+      msgExp = [|Message (unObject $(varE selfName)) (Opcode opcode) $(listE allExps) $fds|]
       bodyStmts =
         [ bindS (varP newIdName) [|allocateNewId|]
-        , noBindS [|registerObject $(varE newIdName) (mkEntry $(varE handlersName))|]
+        , noBindS [|registerObject $(varE newIdName) (mkEntry (Object $(varE newIdName)) $(varE handlersName))|]
         , noBindS [|sendMessage (encodeMessage $msgExp)|]
         , noBindS [|pure (Object $(varE newIdName))|]
         ]
@@ -401,17 +422,62 @@ generateFdList exps names = do
 -- Enums
 --------------------------------------------------------------------------------
 
+enumTypeName, flagTypeName, fromWordFlagFnName, fromWordFnName, toWordFnFlagName, toWordFnName, toBitFnFlagName :: Text -> Enum' -> String
+enumTypeName owner e = unpack (toCamelU owner) ++ unpack (toCamelU (enumName e)) ++ "Enum"
+flagTypeName owner e = unpack (toCamelU owner) ++ unpack (toCamelU (enumName e)) ++ "Flag"
+fromWordFnName owner e = "wordTo" ++ enumTypeName owner e
+fromWordFlagFnName owner e = "wordTo" ++ flagTypeName owner e
+toWordFnName owner e = (transformFstStr toLower $ enumTypeName owner e) ++ "ToWord"
+toWordFnFlagName owner e = (transformFstStr toLower $ flagTypeName owner e) ++ "ToWord"
+toBitFnFlagName owner e = (transformFstStr toLower $ flagTypeName owner e) ++ "Bit"
+
 generateIfaceEnums :: Interface -> Q [Dec]
 generateIfaceEnums Interface{ifaceName = n, ifaceEnums = enums} = do
-  let uName = unpack . toCamelU $ n
-  flattenQ $ generateEnum uName <$> enums
+  flattenQ $ generatePlainEnumDecls n <$> enums
 
-generateEnum :: String -> Enum' -> Q [Dec]
-generateEnum uName Enum'{enumName = n, enumEntries = entries} = do
-  let eName = (uName ++) . unpack . toCamelU $ n
-      entryNames = ((\e -> normalC e []) . mkName . (eName ++) . unpack . toCamelU . enumEntryName) <$> entries
-  dec <- dataD (cxt []) (mkName (eName ++ "Enum")) [] Nothing entryNames []
-  pure [dec]
+generatePlainEnumDecls :: Text -> Enum' -> Q [Dec]
+generatePlainEnumDecls owner e@Enum'{enumEntries = entries, enumBitfield = bit} = do
+  let tyName = mkName ((if bit then flagTypeName else enumTypeName) owner e)
+      base = unpack (toCamelU owner) ++ unpack (toCamelU (enumName e))
+      ctorName entry = mkName (base ++ unpack (toCamelU (enumEntryName entry)))
+      fromFn = mkName $ (if bit then fromWordFlagFnName else fromWordFnName) owner e
+      toFn = mkName $ (if bit then toWordFnFlagName else toWordFnName) owner e
+      bitFn = mkName $ toBitFnFlagName owner e
+
+  dataDec <- dataD (cxt []) tyName [] Nothing ([normalC (ctorName entry) [] | entry <- entries]) [derivClause Nothing [conT ''Eq, conT ''Show, conT ''Enum, conT ''Bounded]]
+
+  let fromClauses =
+        if bit
+          then [generateBitfieldEnumFromClause bitFn]
+          else [clause [litP (integerL (fromIntegral (enumEntryValue entry)))] (normalB (conE (ctorName entry))) [] | entry <- entries]
+      toClauses =
+        if bit
+          then [generateBitfieldEnumToClause bitFn]
+          else [clause [conP (ctorName entry) []] (normalB (litE (integerL (fromIntegral (enumEntryValue entry))))) [] | entry <- entries]
+      bitClauses = [clause [conP (ctorName entry) []] (normalB (litE (integerL (fromIntegral (enumEntryValue entry))))) [] | entry <- entries]
+
+  fromSig <- sigD fromFn (if bit then [t|Word32 -> [$(conT tyName)]|] else [t|Word32 -> $(conT tyName)|])
+  fromFun <- funD fromFn fromClauses
+  toSig <- sigD toFn (if bit then [t|[$(conT tyName)] -> Word32|] else [t|$(conT tyName) -> Word32|])
+  toFun <- funD toFn toClauses
+  toBitSig <- sigD bitFn [t|$(conT tyName) -> Word32|]
+  toBitFun <- funD bitFn bitClauses
+  pure $ [dataDec, fromSig, fromFun, toSig, toFun] ++ (if bit then [toBitSig, toBitFun] else [])
+
+generateBitfieldEnumFromClause :: TH.Name -> Q Clause
+generateBitfieldEnumFromClause bitName = do
+  numName <- newName "w"
+  let e = [|[f | f <- [minBound .. maxBound], $(varE numName) .&. $(varE bitName) f /= 0]|]
+  clause [varP numName] (normalB e) []
+
+generateBitfieldEnumToClause :: TH.Name -> Q Clause
+generateBitfieldEnumToClause bitName = do
+  numName <- newName "w"
+  clause [varP numName] (normalB [|foldr ((.|.) . $(varE bitName)) 0 $(varE numName)|]) []
+
+--------------------------------------------------------------------------------
+-- Helpers
+--------------------------------------------------------------------------------
 
 generateDecodePattern :: Argument -> Q (Q Pat, TH.Name)
 generateDecodePattern Argument{argType = t} = do
@@ -429,8 +495,14 @@ generateDecodePattern Argument{argType = t} = do
         TypeNewId _ -> [p|ValueNewId $x|]
   pure (r, nameX)
 
-generateEncodePattern :: Argument -> Q (Q Exp, TH.Name)
-generateEncodePattern Argument{argType = t} = do
+generateEncodePattern :: EnumTable -> Text -> Argument -> Q (Q Exp, TH.Name)
+generateEncodePattern et selfName Argument{argEnum = Just ref} = do
+  nameX <- newName "x"
+  let (owner, e) = resolveEnumRef et selfName ref
+      fnName = mkName $ (if enumBitfield e then toWordFnFlagName else toWordFnName) owner e
+      value = if enumBitfield e then (varE fnName) `appE` (varE nameX) else (varE fnName) `appE` (varE nameX)
+   in pure ([|ValueUInt (fromIntegral $value)|], nameX)
+generateEncodePattern _ _ Argument{argType = t} = do
   nameX <- newName "x"
   let x = varE nameX
       r = case t of
@@ -447,8 +519,16 @@ generateEncodePattern Argument{argType = t} = do
         TypeNewId _ -> [|ValueNewId $x|]
   pure (r, nameX)
 
-generateArgType :: Argument -> Q Type
-generateArgType Argument{argType = t} = case t of
+-- generateArgType enumTable selfIface Argument{argType = t, argEnum = menum} = case menum of
+--   Just ref -> let (owner, e) = resolveEnumRef enumTable selfIface ref
+--                in conT (mkName (if enumBitfield e then flagsTypeName owner e else enumTypeName owner e))
+--   Nothing -> case t of
+
+generateArgType :: EnumTable -> Text -> Argument -> Q Type
+generateArgType et selfName Argument{argEnum = Just ref} =
+  let (owner, e) = resolveEnumRef et selfName ref
+   in if enumBitfield e then [t|[$(conT (mkName (flagTypeName owner e)))]|] else conT (mkName (enumTypeName owner e))
+generateArgType _ _ Argument{argType = t, argEnum = Nothing} = case t of
   TypeInt -> [t|Int32|]
   TypeUInt -> [t|Word32|]
   TypeFixed -> [t|Fixed|] -- Alias for Int32
@@ -478,14 +558,8 @@ transformFstStr f str = case str of
 toCamelU :: Text -> Text
 toCamelU t = T.concat $ transformFst C.toUpper <$> splitOn "_" t
 
-toCamelL :: Text -> Text
-toCamelL t = transformFst C.toLower $ toCamelU t
-
 flattenQ :: [Q [a]] -> Q [a]
 flattenQ = fmap concat . sequence
-
-notWrittenYetExp :: Q Exp
-notWrittenYetExp = [|error "not written yet"|]
 
 buildArrow :: [Q Type] -> Q Type -> Q Type
 buildArrow argTys result = foldr (\a r -> [t|$a -> $r|]) result argTys

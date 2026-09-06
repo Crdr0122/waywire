@@ -45,15 +45,16 @@ common warnings
 library
   exposed-modules:
     Wayland
+    Wayland.Types
+    Wayland.Dispatch
+    Wayland.Generated
+    Wayland.Connection
+
+  other-modules:
     Wayland.Decode
     Wayland.Encode
     Wayland.Protocol
     Wayland.Protocol.Parser
-    Wayland.Types
-    Wayland.Dispatch
-    Wayland.Generated
-
-  other-modules:
     Wayland.TH
 
   build-depends:
@@ -66,6 +67,7 @@ library
     network,
     template-haskell,
     text,
+    async,
     transformers,
     unix,
     xml-conduit,

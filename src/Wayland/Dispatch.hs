@@ -1,4 +1,6 @@
-module Wayland.Dispatch where
+module Wayland.Dispatch (
+  recvLoop,
+) where
 
 import Control.Concurrent.MVar
 import Control.Monad (when)
@@ -78,7 +80,7 @@ fillMore :: RecvState -> W RecvState
 fillMore st = do
   sock <- asks envSocket
   (chunk, fds, flags) <- liftIO $ do
-    (_addr, bs, cmsgs, flags) <- withMVar sock $ \s -> recvMsg s 4096 512 mempty
+    (_addr, bs, cmsgs, flags) <- recvMsg sock 4096 512 mempty
     let newFds = concat [fs | c <- cmsgs, cmsgId c == CmsgIdFds, Just fs <- [decodeCmsg c :: Maybe [Fd]]]
     pure (bs, newFds, flags)
   when (truncatedControl flags) $

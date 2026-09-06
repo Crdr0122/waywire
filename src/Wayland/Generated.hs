@@ -6,4 +6,4 @@ module Wayland.Generated where
 
 import Wayland.TH
 
-$(testProtocol "files/wayland.xml")
+$(generateModule "files/wayland.xml")

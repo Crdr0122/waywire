@@ -1,6 +1,7 @@
 module Wayland.Protocol where
 
 import Data.List (elemIndex)
+import Data.Map (Map, findWithDefault, fromList)
 import Data.Text (Text)
 
 data Protocol = Protocol
@@ -93,6 +94,19 @@ data EnumRef
   = LocalEnum Text
   | ExternalEnum Text Text
   deriving (Eq, Show)
+
+type EnumTable = Map (Text, Text) Enum'
+
+buildEnumTable :: Protocol -> EnumTable
+buildEnumTable Protocol{protoInterfaces = ifaces} =
+  fromList [((ifaceName i, enumName e), e) | i <- ifaces, e <- ifaceEnums i]
+
+resolveEnumRef :: EnumTable -> Text -> EnumRef -> (Text, Enum')
+resolveEnumRef table selfIface ref = case ref of
+  LocalEnum en -> (selfIface, look (selfIface, en))
+  ExternalEnum ifaceN en -> (ifaceN, look (ifaceN, en))
+ where
+  look key = findWithDefault (error ("waywire: unresolved enum ref " ++ show key)) key table
 
 isNewID :: Argument -> Bool
 isNewID Argument{argType = TypeNewId _} = True
