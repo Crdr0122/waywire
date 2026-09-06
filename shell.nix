@@ -5,17 +5,13 @@ pkgs.mkShell {
   nativeBuildInputs = with pkgs; [
     pkg-config
     (haskellPackages.ghcWithPackages (p: [
-      p.bimap
       p.filepath
       p.directory
-      p.aeson
       p.cabal-install
       p.xml-conduit
-      p.hxt
     ]))
   ];
   buildInputs = with pkgs; [
     wayland
-    libxkbcommon
   ];
 }
