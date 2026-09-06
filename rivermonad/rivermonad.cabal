@@ -111,7 +111,8 @@ executable rivermonad
     stm,
     text,
     unix,
-    unordered-containers
+    unordered-containers,
+    waywire
 
   -- Directories containing source files.
   hs-source-dirs:

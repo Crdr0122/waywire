@@ -44,11 +44,10 @@ common warnings
 
 library
   exposed-modules:
-    Wayland
-    Wayland.Types
+    Wayland.Connection
     Wayland.Dispatch
     Wayland.Generated
-    Wayland.Connection
+    Wayland.Types
 
   other-modules:
     Wayland.Decode
@@ -58,16 +57,17 @@ library
     Wayland.TH
 
   build-depends:
+    async,
     base >=4.7,
     binary,
     bytestring,
     containers,
     directory,
-    mtl,
+    filepath,
     network,
+    mtl,
     template-haskell,
     text,
-    async,
     transformers,
     unix,
     xml-conduit,
@@ -75,12 +75,3 @@ library
   hs-source-dirs: src
   default-language: GHC2024
   ghc-options: -Wall
-
-test-suite test
-  type: exitcode-stdio-1.0
-  main-is: test.hs
-  default-language: GHC2024
-  build-depends: base >=4.7
-  hs-source-dirs:
-    tests
-    src

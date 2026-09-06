@@ -2,9 +2,8 @@
 {-# LANGUAGE TemplateHaskell #-}
 {-# LANGUAGE TypeFamilies #-}
 
-module Wayland.TH (generateModules, generateModule) where
+module Wayland.TH (generateModule, readSiblingFile, generateProtocol) where
 
-import Control.Monad (filterM, forM)
 import Data.Bits ((.&.), (.|.))
 import Data.ByteString (ByteString)
 import Data.ByteString.Lazy qualified as BL
@@ -12,14 +11,13 @@ import Data.Char as C
 import Data.Int (Int32)
 import Data.List (findIndex)
 import Data.List qualified as L
-import Data.Map qualified as M
-import Data.Maybe (catMaybes)
 import Data.Proxy
 import Data.Text (Text, cons, splitOn, uncons, unpack)
 import Data.Text qualified as T
 import Data.Word (Word32)
 import Language.Haskell.TH as TH
-import System.Directory
+import Language.Haskell.TH.Syntax (lift)
+import System.FilePath (takeDirectory, (</>))
 import System.Posix.Types (Fd)
 import Text.XML
 import Text.XML.Cursor
@@ -29,27 +27,31 @@ import Wayland.Protocol
 import Wayland.Protocol.Parser
 import Wayland.Types
 
-generateModules :: FilePath -> Q [Dec]
-generateModules fp = do
-  allFiles <- runIO $ listDirectory fp
-  files <- runIO $ filterM (\path -> doesFileExist (fp <> path)) allFiles
-  maybeProtocols <- sequence $ single <$> files
-  let (ets, protocols) = unzip $ catMaybes maybeProtocols
-      table = M.unions ets
-  concat <$> (forM protocols $ generateProtocol table)
- where
-  single f = do
-    fileContent <- runIO $ Text.XML.readFile def f
-    case parseProtocol $ fromDocument fileContent of
-      Right a -> let et = buildEnumTable a in pure (Just (et, a))
-      Left _ -> pure Nothing
+thisModuleDir :: Q FilePath
+thisModuleDir = takeDirectory . loc_filename <$> location
 
-generateModule :: FilePath -> Q [Dec]
-generateModule fp = do
-  fileContent <- runIO $ Text.XML.readFile def fp
+readSiblingFile :: FilePath -> Q FilePath
+readSiblingFile name = do
+  path <- (</> name) <$> thisModuleDir
+  pure path
+
+generateModule :: String -> Q [Dec]
+generateModule xml = do
+  fileContent <- runIO $ Text.XML.readFile def xml
   case parseProtocol $ fromDocument fileContent of
-    Right a -> let et = buildEnumTable a in generateProtocol et a
+    Right a -> do
+      let et = buildEnumTable a
+      p <- generateProtocol et a
+      e <- generateWaylandEnumTable et
+      pure (p ++ e)
     Left _ -> pure []
+
+generateWaylandEnumTable :: EnumTable -> Q [Dec]
+generateWaylandEnumTable et = do
+  m <- lift et
+  sig <- sigD (mkName "waylandXmlEnumTable") [t|EnumTable|]
+  dec <- valD (varP (mkName "waylandXmlEnumTable")) (normalB (pure m)) []
+  pure [sig, dec]
 
 generateProtocol :: EnumTable -> Protocol -> Q [Dec]
 generateProtocol et Protocol{protoInterfaces = ifaces} = do

@@ -3,6 +3,7 @@ module Wayland.Protocol where
 import Data.List (elemIndex)
 import Data.Map (Map, findWithDefault, fromList)
 import Data.Text (Text)
+import Language.Haskell.TH.Syntax (Lift)
 
 data Protocol = Protocol
   { protoName :: Text
@@ -72,7 +73,7 @@ data Enum' = Enum'
   , enumBitfield :: Bool
   , enumEntries :: [EnumEntry]
   }
-  deriving (Eq, Show)
+  deriving (Eq, Show, Lift)
 
 data EnumEntry = EnumEntry
   { enumEntryName :: Text
@@ -82,13 +83,13 @@ data EnumEntry = EnumEntry
   , enumEntrySince :: Int
   , enumEntryDeprecatedSince :: Maybe Int
   }
-  deriving (Eq, Show)
+  deriving (Eq, Show, Lift)
 
 data Description = Description
   { descSummary :: Maybe Text
   , descText :: Text
   }
-  deriving (Eq, Show)
+  deriving (Eq, Show, Lift)
 
 data EnumRef
   = LocalEnum Text
