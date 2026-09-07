@@ -10,12 +10,12 @@ Generated stuff:
 - Enums, with bitfield enums being passed as lists of the enums
 
 # Notes
-Fixedt is currently represented as a word32, make own conversion functions
-Bitfield enums are represented as lists of enum values, don't repeat
-Only supports generating all the protocols in one generatedModules call, or else external enums and cross protocol calls error
-If two events can make new objects of each other, the handlers infinitely wrap down
-Destructors not distinguished out yet, won't actually matter since you should also remember yourself which stuff are destroyed, the internal map shouldn't be relied on
-There should be a more ergonomic way to put env, so that handlers wont need W() but just IO(), however requests need the env or else they do not have a way to send messages
+- Fixedt is currently represented as a word32, make own conversion functions
+- Bitfield enums are represented as lists of enum values, don't repeat
+- Only supports generating all the protocols in one generatedModules call, or else external enums and cross protocol calls error
+- If two events can make new objects of each other, the handlers infinitely wrap down
+- Destructors not distinguished out yet, won't actually matter since you should also remember yourself which stuff are destroyed, the internal map shouldn't be relied on
+- There should be a more ergonomic way to put env, so that handlers wont need W() but just IO(), however requests need the env or else they do not have a way to send messages
   - I can do liftIO in the generated code, but that means I cannot do ask in the handler anymore and have to make handlers in scope of the env passed by connect
 
 # Example
