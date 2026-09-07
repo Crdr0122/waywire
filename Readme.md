@@ -1,6 +1,6 @@
 # How to use
 Pass your protocols containing folder into generateModules to generate all the stuff
-Generated stuff:
+## Generated stuff:
 - A data type for each interface: eg. data WlDisplay 
 - A function for each request that takes in the called object itself and the required arguments: eg. wlDisplaySync
 - A function for new_id requests also returns the objectId for that new object and needs the handlers
@@ -22,6 +22,7 @@ Generated stuff:
 - You can use registerObject to override a registered handler. This is used in connect to register the first WlDisplayHandler
 - Destructors not distinguished out yet, won't actually matter since you should also remember yourself which stuff are destroyed, the internal map shouldn't be relied on
 - Do I need to add something for the user to pass in their own data like the void* ptr in libwayland?
+- If there are any funnily named requests or events that cause name collision, I would need to change the namings. Right now I haven't met any protocols that do that
 
 # Example
 ``` haskell
