@@ -15,10 +15,11 @@ Generated stuff:
 - Only supports generating all the protocols in one generatedModules call, or else external enums and cross protocol calls error
 - If two events can make new objects of each other, the handlers infinitely wrap down
 - Destructors not distinguished out yet, won't actually matter since you should also remember yourself which stuff are destroyed, the internal map shouldn't be relied on
+- Do I need to add something for the user to pass in their own data like the void* ptr in libwayland?
 
 # Example
 ``` haskell
-$(generateModules "relative path of folder containing protocols")
+$(generateModules "relative path of folder containing protocols eg. files")
 
 bindCompositor :: Object WlRegistry -> Word32 -> Text -> Word32 -> W ()
 bindCompositor obj name iface version = do

@@ -37,8 +37,8 @@ readSiblingFile name = do
   pure path
 
 generateModule :: String -> Q [Dec]
-generateModule xml = do
-  fileContent <- runIO $ Text.XML.readFile def xml
+generateModule fp = do
+  fileContent <- runIO $ Text.XML.readFile def fp
   case parseProtocol $ fromDocument fileContent of
     Right a -> do
       let et = buildEnumTable a
