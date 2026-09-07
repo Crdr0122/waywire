@@ -23,8 +23,7 @@ data Display = Display
   }
 
 {- | Connects, starts the background read loop, registers wl_display
-itself at id 1 (see note above -- nothing else will ever do this
-for you), fetches the registry, and does one 'roundtrip' before
+itself at id, fetches the registry, and does one 'roundtrip' before
 returning so every global advertised at connect time has already
 reached 'onWlRegistryGlobal' by the time you get 'Display' back.
 -}

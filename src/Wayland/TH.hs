@@ -4,6 +4,7 @@
 
 module Wayland.TH (generateModule, readSiblingFile, generateProtocol) where
 
+import Control.Monad (forM_)
 import Data.Bits ((.&.), (.|.))
 import Data.ByteString (ByteString)
 import Data.ByteString.Lazy qualified as BL
@@ -16,7 +17,7 @@ import Data.Text (Text, cons, splitOn, uncons, unpack)
 import Data.Text qualified as T
 import Data.Word (Word32)
 import Language.Haskell.TH as TH
-import Language.Haskell.TH.Syntax (lift)
+import Language.Haskell.TH.Syntax (addModFinalizer, lift)
 import System.FilePath (takeDirectory, (</>))
 import System.Posix.Types (Fd)
 import Text.XML
@@ -66,9 +67,9 @@ generateProtocol et Protocol{protoInterfaces = ifaces} = do
 |Used only as the phantom parameter of 'Object' and 'Handlers'.
 -}
 generateIfaceType :: Interface -> Q [Dec]
-generateIfaceType Interface{ifaceName = n} = do
+generateIfaceType Interface{ifaceName = n, ifaceDescription = desc} = do
   let hsName = mkName . unpack . toCamelU $ n
-  dec <- dataD (cxt []) hsName [] Nothing [] []
+  dec <- dataD_doc (cxt []) hsName [] Nothing [] [] (T.unpack . descText <$> desc)
   pure [dec]
 
 --------------------------------------------------------------------------------
@@ -128,8 +129,10 @@ generateIfaceEvents et Interface{ifaceName = n, ifaceEvents = events} = do
 
 -- | Build one record field for the handlers type. eg. onWlSurfaceEnter
 generateHandlerField :: EnumTable -> Text -> String -> Event -> Q VarBangType
-generateHandlerField et selfIface uName Event{eventName = n, eventArguments = args} = do
+generateHandlerField et selfIface uName Event{eventName = n, eventArguments = args, eventDescription} = do
   let fieldName = mkName ("on" ++ uName ++ (unpack . toCamelU $ n))
+      desc = T.unpack . descText <$> eventDescription
+  forM_ desc $ (addModFinalizer . putDoc (DeclDoc fieldName))
   varBangType
     fieldName
     (bangType (bang noSourceUnpackedness noSourceStrictness) (generateHandlerFieldType et selfIface uName args))
@@ -304,21 +307,22 @@ new_id argument (if any):
                              interface, takes an explicit version
 -}
 generateReq :: EnumTable -> Text -> String -> String -> Int -> Request -> Q [Dec]
-generateReq et selfIface uName lName opcode Request{reqName = n, reqArguments = args} = do
+generateReq et selfIface uName lName opcode Request{reqName = n, reqArguments = args, reqDescription} = do
   let rName = mkName (lName ++ (unpack . toCamelU $ n))
       (newIdArgs, restArgs) = L.partition isNewID args
       position = findIndex isNewID args
+      desc = T.unpack . descText <$> reqDescription
   case (position, newIdArgs) of
     (Nothing, _) -> do
       sig <- sigD rName (generateSimpleReqType et selfIface uName args)
-      fun <- funD rName [generateSimpleClause et selfIface opcode args]
+      fun <- funD_doc rName [generateSimpleClause et selfIface opcode args] desc []
       pure [sig, fun]
     (Just i, [Argument{argType = TypeNewId (Just childIfaceText)}]) -> do
       sig <- sigD rName (generateSpawnReqType et selfIface uName childIfaceText restArgs)
-      fun <- funD rName [generateSpawnClause et selfIface opcode i childIfaceText restArgs]
+      fun <- funD_doc rName [generateSpawnClause et selfIface opcode i childIfaceText restArgs] desc []
       pure [sig, fun]
     (Just i, [Argument{argType = TypeNewId Nothing}]) ->
-      generateBindReq et selfIface rName uName opcode i restArgs
+      generateBindReq et selfIface rName uName opcode i restArgs desc
     _ -> error "waywire: multiple new_id arguments in a single request is not supported"
 
 generateSimpleReqType :: EnumTable -> Text -> String -> [Argument] -> Q Type
@@ -377,8 +381,8 @@ bindWlRegistryBind self name version handlers = do
     [ValueUInt name, ValueNewIdUntyped (ifaceNameT (Proxy :: Proxy i)) version newId] []))
   pure (Object newId)
 -}
-generateBindReq :: EnumTable -> Text -> TH.Name -> String -> Int -> Int -> [Argument] -> Q [Dec]
-generateBindReq et selfIface rName uName opcode newIdPos restArgs = do
+generateBindReq :: EnumTable -> Text -> TH.Name -> String -> Int -> Int -> [Argument] -> Maybe String -> Q [Dec]
+generateBindReq et selfIface rName uName opcode newIdPos restArgs desc = do
   iName <- newName "i"
   selfName <- newName "self"
   versionName <- newName "version"
@@ -410,7 +414,7 @@ generateBindReq et selfIface rName uName opcode newIdPos restArgs = do
         , noBindS [|sendMessage (encodeMessage $msgExp)|]
         , noBindS [|pure (Object $(varE newIdName))|]
         ]
-  fun <- funD rName [clause pats (normalB (doE bodyStmts)) []]
+  fun <- funD_doc rName [clause pats (normalB (doE bodyStmts)) []] desc []
   pure [sig, fun]
 
 generateFdList :: [Argument] -> [TH.Name] -> Q Exp
@@ -438,15 +442,16 @@ generateIfaceEnums Interface{ifaceName = n, ifaceEnums = enums} = do
   flattenQ $ generatePlainEnumDecls n <$> enums
 
 generatePlainEnumDecls :: Text -> Enum' -> Q [Dec]
-generatePlainEnumDecls owner e@Enum'{enumEntries = entries, enumBitfield = bit} = do
+generatePlainEnumDecls owner e@Enum'{enumEntries = entries, enumBitfield = bit, enumDescription} = do
   let tyName = mkName ((if bit then flagTypeName else enumTypeName) owner e)
       base = unpack (toCamelU owner) ++ unpack (toCamelU (enumName e))
       ctorName entry = mkName (base ++ unpack (toCamelU (enumEntryName entry)))
       fromFn = mkName $ (if bit then fromWordFlagFnName else fromWordFnName) owner e
       toFn = mkName $ (if bit then toWordFnFlagName else toWordFnName) owner e
       bitFn = mkName $ toBitFnFlagName owner e
+      desc = T.unpack . descText <$> enumDescription
 
-  dataDec <- dataD (cxt []) tyName [] Nothing ([normalC (ctorName entry) [] | entry <- entries]) [derivClause Nothing [conT ''Eq, conT ''Show, conT ''Enum, conT ''Bounded]]
+  dataDec <- dataD_doc (cxt []) tyName [] Nothing ([(normalC (ctorName entry) [], Nothing, []) | entry <- entries]) [derivClause Nothing [conT ''Eq, conT ''Show, conT ''Enum, conT ''Bounded]] desc
 
   let fromClauses =
         if bit
