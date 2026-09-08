@@ -36,7 +36,6 @@ license-file: LICENSE
 build-type: Simple
 -- Extra doc files to be distributed with the package, such as a CHANGELOG or a README.
 extra-doc-files: CHANGELOG.md
-
 extra-source-files: src/Wayland/wayland.xml
 
 -- Extra source files to be distributed with the package, such as examples, or a tutorial module.
@@ -47,16 +46,16 @@ common warnings
 library
   exposed-modules:
     Wayland.Connection
-    Wayland.Dispatch
     Wayland.Generated
-    Wayland.Types
 
   other-modules:
     Wayland.Decode
+    Wayland.Dispatch
     Wayland.Encode
     Wayland.Protocol
     Wayland.Protocol.Parser
     Wayland.TH
+    Wayland.Types
 
   build-depends:
     async,
@@ -66,8 +65,8 @@ library
     containers,
     directory,
     filepath,
-    network,
     mtl,
+    network,
     template-haskell,
     text,
     transformers,

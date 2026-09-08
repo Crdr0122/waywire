@@ -2,6 +2,12 @@ module Wayland.Connection (
   Display (..),
   connect,
   roundtrip,
+  registerObject,
+  Object (..),
+  ObjectId (..),
+  Fixed,
+  W,
+  Env (..),
 ) where
 
 import Control.Concurrent.Async (Async, async)
