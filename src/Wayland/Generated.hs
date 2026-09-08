@@ -2,7 +2,7 @@
 {-# LANGUAGE TemplateHaskell #-}
 {-# LANGUAGE TypeFamilies #-}
 
-module Wayland.Generated (module Wayland.Generated, readSiblingFile) where
+module Wayland.Generated where
 
 import Control.Monad (filterM, forM, forM_)
 import Data.Map qualified as M
@@ -10,19 +10,20 @@ import Data.Maybe (catMaybes)
 import Language.Haskell.TH as TH
 import Language.Haskell.TH.Syntax (addDependentFile)
 import System.Directory
+import System.FilePath ((</>))
 import Text.XML
 import Text.XML.Cursor
 import Wayland.Protocol
 import Wayland.Protocol.Parser
 import Wayland.TH
 
-$(readSiblingFile "wayland.xml" >>= generateModule)
+$(generateModule "files/wayland.xml")
 
 generateModules :: FilePath -> Q [Dec]
-generateModules folder = do
-  fp <- readSiblingFile folder
-  allFiles <- runIO $ listDirectory fp
-  files <- runIO $ filterM (\path -> doesFileExist (fp <> path)) allFiles
+generateModules fp = do
+  allFilesWithoutDir <- runIO $ listDirectory fp
+  let allFiles = (fp </>) <$> allFilesWithoutDir
+  files <- runIO $ filterM doesFileExist allFiles
   forM_ files addDependentFile
   maybeProtocols <- sequence $ single <$> files
   let (ets, protocols) = unzip $ catMaybes maybeProtocols
