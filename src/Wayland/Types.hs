@@ -27,7 +27,7 @@ newtype Opcode = Opcode Word16 deriving (Eq, Ord, Show)
 newtype Object a = Object
   { unObject :: ObjectId
   }
-  deriving (Eq, Show)
+  deriving (Eq, Ord, Show)
 
 data Value
   = ValueInt Int32
