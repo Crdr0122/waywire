@@ -139,7 +139,7 @@ generateHandlerField et selfIface uName Event{eventName = n, eventArguments = ar
 
 {- | Non-spawning event: @arg1 -> arg2 -> ... -> W ()@.
 Spawning event (one new_id arg with a known interface): the new
-object is passed first, and the result is @W (Handlers Child)@ so
+object is passed first, and the result is @W (Maybe (Handlers Child))@ so
 the dispatch clause knows what to register.
 -}
 generateHandlerFieldType :: EnumTable -> Text -> String -> [Argument] -> Q Type
@@ -150,7 +150,7 @@ generateHandlerFieldType et selfIface uName args =
         Just (childIfaceText, otherArgs) ->
           let childTy = conT (mkName . unpack . toCamelU $ childIfaceText)
               argTys = selfTy : [t|Object $childTy|] : (generateArgType et selfIface <$> otherArgs)
-           in buildArrow argTys [t|W (Handlers $childTy)|]
+           in buildArrow argTys [t|W (Maybe (Handlers $childTy))|]
 
 {- | Finds the single new_id-with-known-interface argument, if any,
 and returns it along with the remaining arguments in their
@@ -211,8 +211,10 @@ generateEventBody et selfIface fieldName selfName args varNames handlersName lef
        in [|
             Right
               ( do
-                  h <- $applyHandler
-                  registerObject $(varE newIdVar) (mkEntry (Object $(varE newIdVar)) h)
+                  mh <- $applyHandler
+                  case mh of
+                    Nothing -> pure ()
+                    Just h -> registerObject $(varE newIdVar) (mkEntry (Object $(varE newIdVar)) h)
               , $(varE leftoverFdsName)
               )
             |]
