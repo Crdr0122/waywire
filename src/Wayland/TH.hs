@@ -2,7 +2,7 @@
 {-# LANGUAGE TemplateHaskell #-}
 {-# LANGUAGE TypeFamilies #-}
 
-module Wayland.TH (generateModule, readSiblingFile, generateProtocol) where
+module Wayland.TH (generateModule, generateProtocol) where
 
 import Control.Monad (forM_)
 import Data.Bits ((.&.), (.|.))
@@ -13,12 +13,12 @@ import Data.Int (Int32)
 import Data.List (findIndex)
 import Data.List qualified as L
 import Data.Proxy
+import Data.Set qualified as S
 import Data.Text (Text, cons, splitOn, uncons, unpack)
 import Data.Text qualified as T
 import Data.Word (Word32)
 import Language.Haskell.TH as TH
 import Language.Haskell.TH.Syntax (addModFinalizer, lift)
-import System.FilePath (takeDirectory, (</>))
 import System.Posix.Types (Fd)
 import Text.XML
 import Text.XML.Cursor
@@ -27,14 +27,6 @@ import Wayland.Encode (encodeMessage)
 import Wayland.Protocol
 import Wayland.Protocol.Parser
 import Wayland.Types
-
-thisModuleDir :: Q FilePath
-thisModuleDir = takeDirectory . loc_filename <$> location
-
-readSiblingFile :: FilePath -> Q FilePath
-readSiblingFile name = do
-  path <- (</> name) <$> thisModuleDir
-  pure path
 
 generateModule :: String -> Q [Dec]
 generateModule fp = do
@@ -453,7 +445,15 @@ generatePlainEnumDecls owner e@Enum'{enumEntries = entries, enumBitfield = bit, 
       bitFn = mkName $ toBitFnFlagName owner e
       desc = T.unpack . descText <$> enumDescription
 
-  dataDec <- dataD_doc (cxt []) tyName [] Nothing ([(normalC (ctorName entry) [], Nothing, []) | entry <- entries]) [derivClause Nothing [conT ''Eq, conT ''Show, conT ''Enum, conT ''Bounded]] desc
+  dataDec <-
+    dataD_doc
+      (cxt [])
+      tyName
+      []
+      Nothing
+      ([(normalC (ctorName entry) [], Nothing, []) | entry <- entries])
+      [derivClause Nothing [conT ''Eq, conT ''Show, conT ''Enum, conT ''Bounded, conT ''Ord]]
+      desc
 
   let fromClauses =
         if bit
@@ -465,9 +465,9 @@ generatePlainEnumDecls owner e@Enum'{enumEntries = entries, enumBitfield = bit, 
           else [clause [conP (ctorName entry) []] (normalB (litE (integerL (fromIntegral (enumEntryValue entry))))) [] | entry <- entries]
       bitClauses = [clause [conP (ctorName entry) []] (normalB (litE (integerL (fromIntegral (enumEntryValue entry))))) [] | entry <- entries]
 
-  fromSig <- sigD fromFn (if bit then [t|Word32 -> [$(conT tyName)]|] else [t|Word32 -> $(conT tyName)|])
+  fromSig <- sigD fromFn (if bit then [t|Word32 -> S.Set $(conT tyName)|] else [t|Word32 -> $(conT tyName)|])
   fromFun <- funD fromFn fromClauses
-  toSig <- sigD toFn (if bit then [t|[$(conT tyName)] -> Word32|] else [t|$(conT tyName) -> Word32|])
+  toSig <- sigD toFn (if bit then [t|S.Set $(conT tyName) -> Word32|] else [t|$(conT tyName) -> Word32|])
   toFun <- funD toFn toClauses
   toBitSig <- sigD bitFn [t|$(conT tyName) -> Word32|]
   toBitFun <- funD bitFn bitClauses
@@ -476,13 +476,13 @@ generatePlainEnumDecls owner e@Enum'{enumEntries = entries, enumBitfield = bit, 
 generateBitfieldEnumFromClause :: TH.Name -> Q Clause
 generateBitfieldEnumFromClause bitName = do
   numName <- newName "w"
-  let e = [|[f | f <- [minBound .. maxBound], $(varE numName) .&. $(varE bitName) f /= 0]|]
+  let e = [|S.fromList [f | f <- [minBound .. maxBound], $(varE numName) .&. $(varE bitName) f /= 0]|]
   clause [varP numName] (normalB e) []
 
 generateBitfieldEnumToClause :: TH.Name -> Q Clause
 generateBitfieldEnumToClause bitName = do
   numName <- newName "w"
-  clause [varP numName] (normalB [|foldr ((.|.) . $(varE bitName)) 0 $(varE numName)|]) []
+  clause [varP numName] (normalB [|S.foldr ((.|.) . $(varE bitName)) 0 $(varE numName)|]) []
 
 --------------------------------------------------------------------------------
 -- Helpers
@@ -536,7 +536,7 @@ generateEncodePattern _ _ Argument{argType = t} = do
 generateArgType :: EnumTable -> Text -> Argument -> Q Type
 generateArgType et selfName Argument{argEnum = Just ref} =
   let (owner, e) = resolveEnumRef et selfName ref
-   in if enumBitfield e then [t|[$(conT (mkName (flagTypeName owner e)))]|] else conT (mkName (enumTypeName owner e))
+   in if enumBitfield e then [t|S.Set $(conT (mkName (flagTypeName owner e)))|] else conT (mkName (enumTypeName owner e))
 generateArgType _ _ Argument{argType = t, argEnum = Nothing} = case t of
   TypeInt -> [t|Int32|]
   TypeUInt -> [t|Word32|]

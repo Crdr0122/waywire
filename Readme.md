@@ -7,7 +7,7 @@ Pass your protocols containing folder into generateModules to generate all the s
 - A handler type for each interface with fields for each event: eg. WlDisplayHandlers{onWlDisplayError, onWlDisplayDeleteId} 
   - For normal events it needs to returns W()
   - For new_id events you need to give it a function that returns maybe the handlers for that object, then that will be registered
-- Enums, with bitfield enums being passed as lists of the enums
+- Enums, with bitfield enums being passed as sets of the enums
   - Internal functions to convert numbers to enums and back, exposed because your protocols may need those as well (if they reference wayland.xml enums)
 - Haddock documentation for functions, events and enums
 
