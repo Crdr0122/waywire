@@ -3,7 +3,7 @@ module Wayland.Dispatch (
 ) where
 
 import Control.Concurrent.MVar
-import Control.Monad (when)
+import Control.Monad (forM_, when)
 import Control.Monad.Reader
 import Data.Bits ((.&.))
 import Data.ByteString qualified as BS
@@ -12,7 +12,7 @@ import Data.Map qualified as Map
 import Network.Socket
 import Network.Socket.ByteString
 import System.IO (hPutStrLn, stderr)
-import System.Posix.Types (Fd)
+import System.Posix.Types (Fd (..))
 import Wayland.Decode (decodeMessageHeader)
 import Wayland.Types
 
@@ -82,6 +82,7 @@ fillMore st = do
   (chunk, fds, flags) <- liftIO $ do
     (_addr, bs, cmsgs, flags) <- recvMsg sock 4096 512 mempty
     let newFds = concat [fs | c <- cmsgs, cmsgId c == CmsgIdFds, Just fs <- [decodeCmsg c :: Maybe [Fd]]]
+    forM_ newFds $ \(Fd c) -> setCloseOnExecIfNeeded c -- If a new process is spawned right before this they can inherit this
     pure (bs, newFds, flags)
   when (truncatedControl flags) $
     liftIO (ioError (userError "wayland: ancillary data truncated, fds were dropped by the kernel"))
