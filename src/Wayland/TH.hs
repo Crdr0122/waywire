@@ -93,9 +93,12 @@ data_offer) instead get a handler field of type
 @Object Child -> ...otherArgs... -> W (Handlers Child)@, and the
 generated dispatch clause registers the child object for you:
 
-> [ValueNewId newId, ...] -> Right $ do
->   h <- onWlDataDeviceDataOffer handlers (Object newId) ...
->   registerObject newId (mkEntry h)
+> [ValueNewId newId, ...] -> Right $ (do
+>   mh <- onWlDataDeviceDataOffer handlers (Object newId) ...
+>   case mh of
+>     Nothing -> pure ()
+>     Just h -> registerObject newId (mkEntry h)
+>   , leftoverFds)
 -}
 generateIfaceEvents :: EnumTable -> Interface -> Q [Dec]
 generateIfaceEvents et Interface{ifaceName = n, ifaceEvents = events} = do

@@ -115,7 +115,8 @@ mkNewEnv = do
     (Just d, Just x) -> pure (x ++ "/" ++ d)
     (Nothing, Just x) -> pure (x ++ "/wayland-0")
     _ -> error "XDG_RUNTIME_DIR not set"
-  soc <- socket AF_UNIX Stream defaultProtocol
+  soc <- socket AF_UNIX Stream defaultProtocol -- Forking here would lead to duplicated fd
+  withFdSocket soc setCloseOnExecIfNeeded
   connect soc (SockAddrUnix p)
   lock <- newMVar ()
   pure $ Env reg i soc lock
