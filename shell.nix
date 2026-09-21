@@ -4,8 +4,7 @@
 pkgs.mkShell {
   nativeBuildInputs = with pkgs; [
     (haskellPackages.ghcWithPackages (p: [
-      p.filepath
-      p.directory
+      p.async
       p.cabal-install
       p.xml-conduit
     ]))
