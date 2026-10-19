@@ -1,17 +1,20 @@
 # How to use
 Pass your protocols containing folder into generateModules to generate all the stuff
+Use connect to get the connection open and object ids for wlDisplay and wlRegistry
+
 ## Generated stuff:
 - A data type for each interface: eg. data WlDisplay 
 - A function for each request that takes in the called object itself and the required arguments: eg. wlDisplaySync
 - A function for new_id requests also returns the objectId for that new object and needs the handlers
 - A handler type for each interface with fields for each event: eg. WlDisplayHandlers{onWlDisplayError, onWlDisplayDeleteId} 
-  - For normal events it needs to returns W()
+  - For normal events it needs to returns W() (Which is just a reader and IO)
   - For new_id events you need to give it a function that returns maybe the handlers for that object, then that will be registered
 - Enums, with bitfield enums being passed as sets of the enums
   - Internal functions to convert numbers to enums and back, exposed because your protocols may need those as well (if they reference wayland.xml enums)
 - Haddock documentation for functions, events and enums
 
 # Notes
+- This is currently only client side, server side should be easy except for some special cases around the first objects
 - Fixedt is currently represented as a word32, make your own conversion functions
 - All the enums are quietly using uint even though the functions will take int, uses fromIntegral, I don't think there are enums using negative numbers or higher than int max?
   - Isn't this a protocol problem? Why is the uint/int type set at the event/request site and not the enum? What happens if two different use sites uses different types?
@@ -19,12 +22,15 @@ Pass your protocols containing folder into generateModules to generate all the s
   - wayland.xml is included and all its enums will be merged into the generatedModules call
 - You can use registerObject to override a registered handler, or add a handler after ignoring it in the event it spawned in. This is used in connect to register the first WlDisplayHandler
 - Destructors not distinguished out yet, won't actually matter since you should also remember yourself which stuff are destroyed, the internal map shouldn't be relied on
-    - This does mean there might be a bug where an object is destroyed, the server reuses that object id, and a new handler is not made for that new object, then it will accidentally use the leftover handler and crash. Never happened yet, will fix when it eventually happens
 - Do I need to add something for the user to pass in their own data like the void* ptr in libwayland?
-- If there are any funnily named requests or events that cause name collision, I would need to change the namings. Right now I haven't met any protocols that do that
+- If there are any funnily named requests or events that cause name collision, I would need to change the naming. Right now I haven't met any protocols that do that
 - File descriptors passed in from events are marked as CLOEXEC, so set that to false if you need to hand it off to another process. 
-- There is a race condition when receiving FD and opening the wayland socket, since recvmsg and socket don't expose MSG_CMSG_CLOEXEC and SOCK_CLOEXEC. Open the wayland socket before spawning processes, as for event FDs good luck
 
+
+# Known Bugs
+- Destructors not distinguished out yet, meaning there might be a bug where an object is destroyed, the server reuses that object id, and a new handler is not made for that new object, then it will accidentally use the leftover handler and crash. Never happened yet, will fix when it eventually happens
+- There is a race condition when receiving FD and opening the wayland socket, since Network.Socket recvmsg and socket don't expose MSG_CMSG_CLOEXEC and SOCK_CLOEXEC. Open the wayland socket before spawning processes, as for event FDs good luck. This may be solved by calling C functions instead? Too lazy
+  
 # Example
 ``` haskell
 $(generateModules "path of folder containing protocols relative to project root eg. files")
