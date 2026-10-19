@@ -19,6 +19,7 @@ Pass your protocols containing folder into generateModules to generate all the s
   - wayland.xml is included and all its enums will be merged into the generatedModules call
 - You can use registerObject to override a registered handler, or add a handler after ignoring it in the event it spawned in. This is used in connect to register the first WlDisplayHandler
 - Destructors not distinguished out yet, won't actually matter since you should also remember yourself which stuff are destroyed, the internal map shouldn't be relied on
+    - This does mean there might be a bug where an object is destroyed, the server reuses that object id, and a new handler is not made for that new object, then it will accidentally use the leftover handler and crash. Never happened yet, will fix when it eventually happens
 - Do I need to add something for the user to pass in their own data like the void* ptr in libwayland?
 - If there are any funnily named requests or events that cause name collision, I would need to change the namings. Right now I haven't met any protocols that do that
 - File descriptors passed in from events are marked as CLOEXEC, so set that to false if you need to hand it off to another process. 
